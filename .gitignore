@@ -1,0 +1,17 @@
+# Virtual environment
+.venv/
+
+# Models (too large for git)
+models/
+data/
+
+# Training output
+output/
+
+# llama.cpp build
+llama.cpp/
+
+# OS
+.DS_Store
+__pycache__/
+*.pyc

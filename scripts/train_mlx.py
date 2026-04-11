@@ -1,0 +1,254 @@
+#!/usr/bin/env python3
+"""
+KIKI-Mac_tunner — MLX LoRA fine-tuning for Apple Silicon.
+
+Designed for Mac Studio M4 Pro 512 Go.
+Supports bf16 full precision LoRA on models up to ~250B parameters.
+
+Usage:
+    python scripts/train_mlx.py --config configs/mistral-large.yaml
+    python scripts/train_mlx.py --config configs/mistral-large.yaml --resume
+"""
+
+import argparse
+import os
+import sys
+import time
+import signal
+import yaml
+import json
+import math
+from pathlib import Path
+
+import mlx.core as mx
+import mlx.nn as nn
+import mlx.optimizers as optim
+from mlx_lm import load, generate
+from mlx_lm.tuner.lora import LoRALinear
+from mlx_lm.tuner.trainer import TrainArgs, train as mlx_train
+from mlx_lm.tuner.datasets import Dataset
+from datasets import load_dataset as hf_load_dataset
+
+
+def load_config(config_path: str) -> dict:
+    with open(config_path) as f:
+        return yaml.safe_load(f)
+
+
+def format_dataset(config: dict, script_dir: Path) -> Path:
+    """Format the HF dataset into JSONL for mlx-lm."""
+    dataset_id = config["dataset_id"]
+    data_dir = script_dir / "data" / Path(dataset_id).name
+    train_file = data_dir / "train.jsonl"
+    valid_file = data_dir / "valid.jsonl"
+
+    if train_file.exists() and valid_file.exists():
+        n_train = sum(1 for _ in open(train_file))
+        print(f"  Dataset already formatted: {n_train} train examples")
+        return data_dir
+
+    print(f"  Downloading and formatting {dataset_id}...")
+    ds = hf_load_dataset(dataset_id, split="train")
+
+    # Format as chat conversations with thinking/reasoning
+    formatted = []
+    for example in ds:
+        conversation = {
+            "messages": [
+                {"role": "user", "content": example["problem"]},
+                {
+                    "role": "assistant",
+                    "content": (
+                        f"<thinking>\n{example['thinking']}\n</thinking>\n\n"
+                        f"{example['solution']}"
+                    ),
+                },
+            ]
+        }
+        formatted.append(json.dumps(conversation, ensure_ascii=False))
+
+    # 95/5 train/valid split
+    split_idx = int(len(formatted) * 0.95)
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    with open(train_file, "w") as f:
+        f.write("\n".join(formatted[:split_idx]))
+    with open(valid_file, "w") as f:
+        f.write("\n".join(formatted[split_idx:]))
+
+    print(f"  Train: {split_idx} | Valid: {len(formatted) - split_idx}")
+    return data_dir
+
+
+def apply_lora(model, config: dict):
+    """Apply LoRA adapters to all linear layers."""
+    rank = config.get("lora_rank", 48)
+    alpha = config.get("lora_alpha", 96)
+    dropout = config.get("lora_dropout", 0.05)
+    scale = alpha / rank
+
+    lora_layers = 0
+    for name, module in model.named_modules():
+        if isinstance(module, nn.Linear) and module.weight.shape[0] > 1:
+            # Replace with LoRA
+            parent_name = ".".join(name.split(".")[:-1])
+            child_name = name.split(".")[-1]
+            parent = model
+            for part in parent_name.split("."):
+                if part:
+                    parent = getattr(parent, part)
+
+            lora_linear = LoRALinear.from_linear(
+                module, r=rank, scale=scale, dropout=dropout
+            )
+            setattr(parent, child_name, lora_linear)
+            lora_layers += 1
+
+    total_params = sum(p.size for _, p in model.parameters())
+    trainable = sum(
+        p.size for name, p in model.parameters() if "lora" in name.lower()
+    )
+    print(f"  LoRA applied: {lora_layers} layers, rank={rank}, alpha={alpha}")
+    print(
+        f"  Parameters: {total_params:,} total, {trainable:,} trainable "
+        f"({trainable/total_params*100:.2f}%)"
+    )
+    return model
+
+
+def find_latest_checkpoint(output_dir: str) -> str | None:
+    """Find the latest checkpoint directory."""
+    output_path = Path(output_dir)
+    if not output_path.exists():
+        return None
+    checkpoints = sorted(
+        [d for d in output_path.iterdir() if d.name.startswith("checkpoint-")],
+        key=lambda d: int(d.name.split("-")[1]),
+    )
+    return str(checkpoints[-1]) if checkpoints else None
+
+
+def main():
+    parser = argparse.ArgumentParser(description="KIKI-Mac_tunner — MLX LoRA training")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="configs/mistral-large.yaml",
+        help="Path to training config YAML",
+    )
+    parser.add_argument(
+        "--resume", action="store_true", help="Resume from latest checkpoint"
+    )
+    args = parser.parse_args()
+
+    script_dir = Path(__file__).resolve().parent.parent
+    config = load_config(script_dir / args.config)
+
+    print("=" * 60)
+    print("KIKI-Mac_tunner — MLX LoRA Fine-tuning")
+    print(f"Config: {args.config}")
+    print(f"Model: {config['model_id']}")
+    print(f"Precision: {config.get('precision', 'bf16')}")
+    print(f"LoRA: rank={config['lora_rank']}, alpha={config['lora_alpha']}")
+    print("=" * 60)
+
+    # Check memory
+    try:
+        import subprocess
+        mem_bytes = int(
+            subprocess.check_output(["sysctl", "-n", "hw.memsize"]).strip()
+        )
+        mem_gb = mem_bytes / 1024**3
+        print(f"\nSystem memory: {mem_gb:.0f} GB")
+        if mem_gb < 256:
+            print(
+                "WARNING: <256 GB RAM. Consider using 4-bit quantized training."
+            )
+    except Exception:
+        pass
+
+    # Format dataset
+    print("\n[1/4] Preparing dataset...")
+    data_dir = format_dataset(config, script_dir)
+
+    # Load model
+    model_dir = script_dir / "models" / Path(config["model_id"]).name
+    if not model_dir.exists():
+        print(f"\n[2/4] Downloading model {config['model_id']}...")
+        from huggingface_hub import snapshot_download
+        snapshot_download(
+            config["model_id"],
+            local_dir=str(model_dir),
+            ignore_patterns=["*.bin", "*.pt"],
+        )
+    else:
+        print(f"\n[2/4] Loading model from {model_dir}...")
+
+    model, tokenizer = load(str(model_dir))
+
+    # Apply LoRA
+    print("\n[3/4] Applying LoRA adapters...")
+    model = apply_lora(model, config)
+
+    # Resume
+    resume_adapter = None
+    if args.resume:
+        checkpoint = find_latest_checkpoint(
+            str(script_dir / config["output_dir"])
+        )
+        if checkpoint:
+            print(f"  Resuming from: {checkpoint}")
+            resume_adapter = checkpoint
+        else:
+            print("  No checkpoint found, starting fresh")
+
+    # Train
+    print("\n[4/4] Training...")
+    output_dir = script_dir / config["output_dir"]
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    train_args = TrainArgs(
+        model=str(model_dir),
+        data=str(data_dir),
+        train=True,
+        adapter_path=resume_adapter,
+        save_every=config.get("save_every", 100),
+        batch_size=config.get("batch_size", 1),
+        iters=config.get("num_epochs", 3)
+        * 2326
+        // config.get("batch_size", 1)
+        // config.get("gradient_accumulation_steps", 4),
+        val_batches=25,
+        learning_rate=config.get("learning_rate", 2e-5),
+        lora_layers=-1,  # All layers (we already applied LoRA)
+        lora_rank=config.get("lora_rank", 48),
+        steps_per_report=5,
+        steps_per_eval=config.get("save_every", 100),
+        max_seq_length=config.get("max_seq_length", 4096),
+        grad_checkpoint=True,
+    )
+
+    # Use mlx-lm's built-in trainer
+    mlx_train(
+        model=model,
+        tokenizer=tokenizer,
+        args=train_args,
+        train_dataset=Dataset(
+            str(data_dir / "train.jsonl"), tokenizer, max_seq_length=train_args.max_seq_length
+        ),
+        val_dataset=Dataset(
+            str(data_dir / "valid.jsonl"), tokenizer, max_seq_length=train_args.max_seq_length
+        ),
+    )
+
+    # Save final adapter
+    final_dir = output_dir / "final-lora"
+    final_dir.mkdir(parents=True, exist_ok=True)
+    model.save_weights(str(final_dir / "adapters.safetensors"))
+    print(f"\n=== Training complete! ===")
+    print(f"Final LoRA adapter: {final_dir}")
+    print(f"Next: ./export.sh")
+
+
+if __name__ == "__main__":
+    main()

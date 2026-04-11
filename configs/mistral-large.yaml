@@ -1,0 +1,30 @@
+# Mistral Large 123B — bf16 full precision LoRA
+# Target: Mac Studio M4 Pro 512 Go
+# Estimated RAM: ~300 GB | Training time: ~1-2 days
+
+model_id: mistralai/Mistral-Large-Instruct-2411
+dataset_id: nohurry/Opus-4.6-Reasoning-3000x-filtered
+
+# LoRA
+lora_rank: 48
+lora_alpha: 96
+lora_dropout: 0.05
+lora_target_modules: all-linear
+
+# Training
+precision: bf16
+num_epochs: 3
+batch_size: 1
+gradient_accumulation_steps: 4
+learning_rate: 2.0e-5
+weight_decay: 0.01
+warmup_ratio: 0.03
+lr_scheduler: cosine
+max_seq_length: 4096
+
+# Checkpoints
+save_every: 100
+save_total_limit: 3
+
+# Output
+output_dir: output/mistral-large-opus
