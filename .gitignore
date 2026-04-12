@@ -15,3 +15,5 @@ llama.cpp/
 .DS_Store
 __pycache__/
 *.pyc
+=0.22.0
+=0.24.0

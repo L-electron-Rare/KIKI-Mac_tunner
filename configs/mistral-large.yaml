@@ -1,30 +1,34 @@
 # Mistral Large 123B — bf16 full precision LoRA
-# Target: Mac Studio M4 Pro 512 Go
-# Estimated RAM: ~300 GB | Training time: ~1-2 days
+# Target: Mac Studio M3 Ultra / M4 Pro 512 Go
+# Estimated RAM: ~310 GB | Training time: ~1-2 days
 
 model_id: mistralai/Mistral-Large-Instruct-2411
 dataset_id: nohurry/Opus-4.6-Reasoning-3000x-filtered
 
-# LoRA
-lora_rank: 48
-lora_alpha: 96
+# LoRA — rank 96 for reasoning distillation (captures complex CoT patterns)
+lora_rank: 64
+lora_alpha: 128
 lora_dropout: 0.05
 lora_target_modules: all-linear
 
-# Training
+# Training — 2 epochs to avoid overfitting on ~3000 examples
 precision: bf16
-num_epochs: 3
+num_epochs: 2
 batch_size: 1
 gradient_accumulation_steps: 4
-learning_rate: 2.0e-5
+learning_rate: 1.5e-5
 weight_decay: 0.01
-warmup_ratio: 0.03
+warmup_ratio: 0.05
 lr_scheduler: cosine
-max_seq_length: 4096
+max_seq_length: 2048
+memory_limit_gb: 460
 
 # Checkpoints
-save_every: 100
-save_total_limit: 3
+save_every: 50
+save_total_limit: 5
+
+# Early stopping — stop if val_loss increases for N consecutive evals
+early_stopping_patience: 3
 
 # Output
 output_dir: output/mistral-large-opus

@@ -7,6 +7,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/.venv/bin/activate"
 
+# Ensure hf CLI is available
+if ! command -v hf &>/dev/null; then
+    echo "Installing hf CLI..."
+    pip install huggingface_hub[cli]
+fi
+
 # Default config
 CONFIG="${1:-configs/mistral-large.yaml}"
 

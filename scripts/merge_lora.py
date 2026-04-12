@@ -2,6 +2,8 @@
 """
 Merge LoRA adapter back into the base model weights.
 
+Uses mlx_lm.fuse under the hood.
+
 Usage:
     python scripts/merge_lora.py \
         --model models/Mistral-Large-Instruct-2411 \
@@ -10,9 +12,9 @@ Usage:
 """
 
 import argparse
+import subprocess
+import sys
 from pathlib import Path
-from mlx_lm import load
-from mlx_lm.tuner.lora import dequantize_and_merge
 
 
 def main():
@@ -29,25 +31,17 @@ def main():
     output_path = Path(args.output)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    print("\nLoading model + adapter...")
-    model, tokenizer = load(args.model, adapter_path=args.adapter)
-
-    print("Merging LoRA weights into base model...")
-    dequantize_and_merge(
-        model=args.model,
-        adapter_path=args.adapter,
-        output_path=str(output_path),
+    print("\nFusing LoRA weights into base model via mlx_lm.fuse...")
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "mlx_lm", "fuse",
+            "--model", args.model,
+            "--adapter-path", args.adapter,
+            "--save-path", str(output_path),
+            "--dequantize",
+        ],
+        check=True,
     )
-
-    # Copy tokenizer files
-    import shutil
-    model_path = Path(args.model)
-    for f in model_path.glob("tokenizer*"):
-        shutil.copy2(f, output_path)
-    for f in model_path.glob("special_tokens*"):
-        shutil.copy2(f, output_path)
-    if (model_path / "config.json").exists():
-        shutil.copy2(model_path / "config.json", output_path)
 
     print(f"\nMerged model saved to: {output_path}")
     print("Next: python scripts/convert_gguf.py or ./export.sh")

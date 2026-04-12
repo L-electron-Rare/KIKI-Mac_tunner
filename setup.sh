@@ -47,18 +47,8 @@ fi
 
 source .venv/bin/activate
 
-echo "Installing MLX + dependencies..."
-uv pip install \
-    mlx>=0.24.0 \
-    mlx-lm>=0.22.0 \
-    huggingface_hub \
-    transformers \
-    safetensors \
-    sentencepiece \
-    protobuf \
-    numpy \
-    pyyaml \
-    datasets
+echo "Installing dependencies..."
+uv pip install -r requirements.txt
 
 echo ""
 echo "=== Setup complete ==="
