@@ -21,6 +21,7 @@ weight_decay: 0.01
 warmup_ratio: 0.03
 lr_scheduler: cosine
 max_seq_length: 4096
+val_batches: 10
 
 # Checkpoints
 save_every: 100

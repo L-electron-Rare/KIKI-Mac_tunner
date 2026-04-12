@@ -6,8 +6,8 @@ model_id: mistralai/Mistral-Large-Instruct-2411
 dataset_id: nohurry/Opus-4.6-Reasoning-3000x-filtered
 
 # LoRA — rank 96 for reasoning distillation (captures complex CoT patterns)
-lora_rank: 64
-lora_alpha: 128
+lora_rank: 48
+lora_alpha: 96
 lora_dropout: 0.05
 lora_target_modules: all-linear
 
@@ -21,7 +21,8 @@ weight_decay: 0.01
 warmup_ratio: 0.05
 lr_scheduler: cosine
 max_seq_length: 2048
-memory_limit_gb: 460
+memory_limit_gb: 400
+val_batches: 5
 
 # Checkpoints
 save_every: 50
