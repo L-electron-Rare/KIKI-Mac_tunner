@@ -218,8 +218,8 @@ def main():
             )
         # Cap Metal memory usage (leave headroom for OS)
         mem_limit_gb = config.get("memory_limit_gb", 460)
-        mx.metal.set_memory_limit(mem_limit_gb * 1024**3)
-        mx.metal.set_cache_limit(32 * 1024**3)
+        mx.set_memory_limit(mem_limit_gb * 1024**3)
+        mx.set_cache_limit(32 * 1024**3)
         print(f"Metal memory limit: {mem_limit_gb} GB, cache limit: 32 GB")
     except Exception:
         pass
@@ -286,7 +286,7 @@ def main():
     train_args = TrainingArgs(
         batch_size=batch_size,
         iters=total_iters,
-        val_batches=25,
+        val_batches=config.get("val_batches", 5),
         steps_per_report=5,
         steps_per_eval=config.get("save_every", 50),
         steps_per_save=config.get("save_every", 50),
