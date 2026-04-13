@@ -4,6 +4,10 @@ train: true
 fine_tune_type: lora
 optimizer: adamw
 num_layers: -1
+lora_parameters:
+  rank: 48
+  scale: 2.0
+  dropout: 0.05
 batch_size: 1
 iters: 1104
 val_batches: 10
@@ -14,6 +18,6 @@ save_every: 50
 grad_accumulation_steps: 4
 max_seq_length: 2048
 grad_checkpoint: true
-clear_cache_threshold: 0.8
+clear_cache_threshold: 107374182400
 adapter_path: output/mistral-large-opus
 seed: 42
