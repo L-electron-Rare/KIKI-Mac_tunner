@@ -8,11 +8,11 @@ fine_tune_type: lora
 optimizer: adamw
 num_layers: -1
 lora_parameters:
-  rank: 32
+  rank: 64
   scale: 2.0
   dropout: 0.05
 batch_size: 1
-iters: 1000
+iters: 2000
 val_batches: 5
 learning_rate: 8e-6
 steps_per_report: 5
