@@ -1,6 +1,6 @@
-# Qwen3.5-122B-A10B-BF16 LoRA — mac-port attention-only profile
+# Qwen3.5-122B-A10B-BF16 LoRA — mac-port attention-only BOOSTED profile
 # Studio M3 Ultra 512 GB — wired-limit 448 GiB, mmap safetensors, grad-checkpoint ON
-# Attention-only LoRA (skip MoE experts) → avoids Metal OOM at iter 15 / peak 463 GB
+# 9 keys across 49 transformer blocks (13 full_attn + 36 linear_attn), no MoE experts.
 
 model: /Users/clems/KIKI-Mac_tunner/models/Qwen3.5-122B-A10B-BF16
 train: true
@@ -19,6 +19,11 @@ lora_parameters:
     - "self_attn.k_proj"
     - "self_attn.v_proj"
     - "self_attn.o_proj"
+    - "linear_attn.in_proj_a"
+    - "linear_attn.in_proj_b"
+    - "linear_attn.in_proj_qkv"
+    - "linear_attn.in_proj_z"
+    - "linear_attn.out_proj"
 
 optimizer: adamw
 learning_rate: 8.0e-6
