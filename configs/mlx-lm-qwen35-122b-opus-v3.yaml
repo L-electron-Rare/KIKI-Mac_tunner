@@ -6,20 +6,20 @@ data: data/final-opus-v3
 train: true
 fine_tune_type: lora
 optimizer: adamw
-num_layers: 32
+num_layers: -1
 lora_parameters:
-  rank: 8
+  rank: 32
   scale: 2.0
   dropout: 0.05
 batch_size: 1
-iters: 500
+iters: 1000
 val_batches: 5
-learning_rate: 5e-6
+learning_rate: 8e-6
 steps_per_report: 5
 steps_per_eval: 50
 save_every: 50
-grad_accumulation_steps: 2
-max_seq_length: 896
+grad_accumulation_steps: 4
+max_seq_length: 2048
 grad_checkpoint: true
 adapter_path: output/qwen35-122b-opus-v3
 seed: 42
