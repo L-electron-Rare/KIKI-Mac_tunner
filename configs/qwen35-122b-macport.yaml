@@ -1,6 +1,7 @@
-# Qwen3.5-122B-A10B-BF16 LoRA — mac-port attention+linear_attn BOOSTED + cache-clear
-# 9 keys across 49 transformer blocks (13 full_attn + 36 linear_attn), no MoE experts.
-# clear_cache_threshold=10 to prevent Metal cache growth (fixed silent jetsam at iter 22).
+# Qwen3.5-122B-A10B-BF16 LoRA — mac-port Quality+ profile
+# Studio M3 Ultra 512 GB — wired-limit 448 GiB, mmap safetensors, grad-checkpoint ON
+# 12 keys: 9 attention (self_attn + linear_attn) + 3 shared_expert MLP (dense, no 256 MoE experts)
+# rank 128 / scale 128 / warmup 250 / 5000 iters = 3.37 epochs on 11880 train samples
 
 model: /Users/clems/KIKI-Mac_tunner/models/Qwen3.5-122B-A10B-BF16
 train: true
@@ -11,8 +12,8 @@ fine_tune_type: lora
 num_layers: -1
 
 lora_parameters:
-  rank: 64
-  scale: 64.0
+  rank: 128
+  scale: 128.0
   dropout: 0.01
   keys:
     - "self_attn.q_proj"
@@ -24,17 +25,20 @@ lora_parameters:
     - "linear_attn.in_proj_qkv"
     - "linear_attn.in_proj_z"
     - "linear_attn.out_proj"
+    - "mlp.shared_expert.gate_proj"
+    - "mlp.shared_expert.up_proj"
+    - "mlp.shared_expert.down_proj"
 
 optimizer: adamw
 learning_rate: 8.0e-6
 lr_schedule:
   name: cosine_decay
-  warmup: 100
-  arguments: [8.0e-6, 3000, 8.0e-7]
+  warmup: 250
+  arguments: [8.0e-6, 5000, 8.0e-7]
 
 batch_size: 1
 grad_accumulation_steps: 8
-iters: 3000
+iters: 5000
 max_seq_length: 2048
 grad_checkpoint: true
 mask_prompt: true
