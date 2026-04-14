@@ -1,0 +1,13 @@
+# Qwen3.5-397B-A17B — Plus gros MoE open-source (Fev 2026)
+# Option A premium : ~222 Go Q4, ~350 Go 8-bit sur 512 Go
+model: models/Qwen3.5-397B-A17B-bf16
+precision: bf16
+estimated_vram_gb: 350
+max_tokens: 8192
+temperature: 0.7
+top_p: 0.95
+enable_thinking: true
+thinking_tag: "<think>"
+thinking_close_tag: "</think>"
+output_format: thinking
+output_name: generated-qwen35-397b

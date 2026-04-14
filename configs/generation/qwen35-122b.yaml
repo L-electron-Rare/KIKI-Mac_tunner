@@ -1,0 +1,13 @@
+# Qwen3.5-122B-A10B — MoE rapide, thinking natif (Fev 2026)
+# ~68 Go Q4, ~130 Go 8-bit — peut tourner avec un autre modele
+model: models/Qwen3.5-122B-A10B-bf16
+precision: bf16
+estimated_vram_gb: 130
+max_tokens: 8192
+temperature: 0.7
+top_p: 0.95
+enable_thinking: true
+thinking_tag: "<think>"
+thinking_close_tag: "</think>"
+output_format: thinking
+output_name: generated-qwen35-122b

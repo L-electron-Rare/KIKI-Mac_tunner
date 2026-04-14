@@ -1,0 +1,13 @@
+# DeepSeek-R1 671B MoE — meilleur raisonneur open-source
+# Option A : un seul gros cerveau (~335 Go 4-bit)
+model: models/DeepSeek-R1-4bit
+precision: 4bit
+estimated_vram_gb: 335
+max_tokens: 8192
+temperature: 0.7
+top_p: 0.95
+system_prompt: ""
+thinking_tag: "<think>"
+thinking_close_tag: "</think>"
+output_format: "thinking"  # le modele genere <think>...</think> nativement
+output_name: "generated-deepseek-r1-671b"

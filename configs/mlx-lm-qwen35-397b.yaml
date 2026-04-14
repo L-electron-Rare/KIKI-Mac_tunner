@@ -1,0 +1,24 @@
+# Qwen3.5-397B-A17B — Plus gros MoE open-source, thinking natif (Fev 2026)
+# Necessite ~222 Go en Q4, ~350 Go en 8-bit
+model: models/Qwen3.5-397B-A17B-bf16
+data: data/combined-opus-20k
+train: true
+fine_tune_type: lora
+optimizer: adamw
+num_layers: -1
+lora_parameters:
+  rank: 16
+  scale: 2.0
+  dropout: 0.05
+batch_size: 1
+iters: 1250
+val_batches: 3
+learning_rate: 5e-6
+steps_per_report: 5
+steps_per_eval: 50
+save_every: 50
+grad_accumulation_steps: 8
+max_seq_length: 4096
+grad_checkpoint: true
+adapter_path: output/qwen35-397b-opus
+seed: 42

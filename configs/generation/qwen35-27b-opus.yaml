@@ -1,0 +1,13 @@
+# Qwen3.5-27B deja distille Opus 4.6 — genere des traces style Claude (Mars 2026)
+# ~56 Go bf16 — leger, rapide, peut tourner avec d'autres modeles
+model: models/Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-v2
+precision: bf16
+estimated_vram_gb: 56
+max_tokens: 8192
+temperature: 0.7
+top_p: 0.95
+enable_thinking: true
+thinking_tag: "<think>"
+thinking_close_tag: "</think>"
+output_format: thinking
+output_name: generated-qwen35-27b-opus

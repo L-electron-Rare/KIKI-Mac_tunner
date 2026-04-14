@@ -15,5 +15,21 @@ llama.cpp/
 .DS_Store
 __pycache__/
 *.pyc
+
+# Logs et fichiers temporaires
+logs/
+*.log
+*.log.*
+*.pid
+*.backup
+*.bak
+*.bak2
+*.bak3
+
+# CoreML packages (generables, trop gros pour git)
+*.mlpackage/
+*.mlmodelc/
+
+# Misc
 =0.22.0
 =0.24.0

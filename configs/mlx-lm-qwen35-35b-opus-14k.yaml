@@ -1,0 +1,26 @@
+# Qwen3.5-35B-A3B-Opus SFT on combined-opus-14k (9322 train + 491 valid)
+# Created 2026-04-14 — pivot from 35B distill (37h ETA) to ready dataset
+# Effective batch: 4*2=8 | 1 epoch = 9322/8 = 1166 iters → use 1200
+
+model: models/Qwen3.5-35B-A3B-Opus-bf16
+data: data/combined-opus-14k
+train: true
+fine_tune_type: lora
+optimizer: adamw
+num_layers: -1
+lora_parameters:
+  rank: 32
+  scale: 2.0
+  dropout: 0.05
+batch_size: 1
+iters: 1200
+val_batches: 10
+learning_rate: 2e-5
+steps_per_report: 10
+steps_per_eval: 100
+save_every: 100
+grad_accumulation_steps: 8
+max_seq_length: 2048
+grad_checkpoint: true
+adapter_path: output/qwen35-35b-opus-14k-v1
+seed: 42

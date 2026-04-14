@@ -38,7 +38,13 @@ M4 Pro, 512 Go memoire unifiee. MLX bf16 complet, ~800 GB/s bande passante.
 | Conversion MLX | `scripts/convert_to_mlx.sh` |
 | Combined dataset prep | `scripts/prepare_combined_dataset.sh` |
 | Generation CPU (llama.cpp) | `scripts/generate_cpu.sh`, `scripts/generate_data_cpu.py` |
+| Distillation script | `scripts/distill_generate.py`, `distill.sh` |
+| Export GGUF pipeline | `scripts/export_gguf.sh` |
 | Modeles GGUF | `scripts/download_gguf.sh`, `models/gguf/` |
+| Recherche ANE hybrid | `research/ane-hybrid/`, `docs/plans/2026-04-14-ane-hybrid-pipeline.md` |
+| Pipeline complet 35B | `scripts/pipeline_35b.sh` |
+| Config fine-tune final | `configs/mlx-lm-qwen35-35b-opus-final.yaml` |
+| Ollama Modelfile | `output/gguf/Modelfile` |
 
 ## Dataset format
 
@@ -141,6 +147,24 @@ Pendant le training MLX (GPU), on peut generer des donnees en parallele :
 ### Builds llama.cpp
 - CPU only : `/tmp/llama-cpp-cpu/build/bin/llama-cli`
 - GPU Metal : `/tmp/llama-cpp-gpu/build/bin/llama-cli`
+
+## Distillation 123B → 35B
+
+Pipeline pour distiller le Mistral Large 123B entraine dans un modele portable de ~20 Go.
+
+### Etape 1 : Generer les traces de distillation
+```
+./distill.sh --num-problems 5000
+```
+Utilise le 123B fuse (checkpoint 1100, val loss 0.479) pour generer des traces
+de raisonnement sur les problemes du dataset.
+
+### Etape 2 : Entrainer le student + exporter GGUF
+```
+# Mettre a jour data: dans configs/mlx-lm-qwen35-35b-opus.yaml → data/distilled-mistral-large-123b
+./scripts/export_gguf.sh all
+```
+Produit un GGUF Q4_K_M de ~20 Go deployable partout (Ollama, llama.cpp, LM Studio).
 
 ## Anti-Patterns
 

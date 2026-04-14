@@ -1,0 +1,23 @@
+model: models/Qwen3-72B-bf16
+data: data/Opus-4.6-Reasoning-3000x-filtered
+train: true
+fine_tune_type: lora
+optimizer: adamw
+num_layers: -1
+lora_parameters:
+  rank: 48
+  scale: 2.0
+  dropout: 0.05
+batch_size: 1
+iters: 1744
+val_batches: 5
+learning_rate: 1.5e-5
+steps_per_report: 5
+steps_per_eval: 50
+save_every: 50
+grad_accumulation_steps: 4
+max_seq_length: 4096
+grad_checkpoint: true
+clear_cache_threshold: 107374182400
+adapter_path: output/qwen3-72b-opus
+seed: 42

@@ -1,0 +1,12 @@
+# Qwen3-235B-A22B MoE — mode thinking natif
+model: models/Qwen3-235B-A22B-bf16
+precision: bf16
+estimated_vram_gb: 200
+max_tokens: 8192
+temperature: 0.7
+top_p: 0.95
+enable_thinking: true
+thinking_tag: "<think>"
+thinking_close_tag: "</think>"
+output_format: "thinking"
+output_name: "generated-qwen3-235b"

@@ -1,0 +1,11 @@
+# DeepSeek-R1-Distill-Llama-70B — raisonnement R1 en 70B
+model: models/DeepSeek-R1-Distill-Llama-70B-bf16
+precision: bf16
+estimated_vram_gb: 140
+max_tokens: 8192
+temperature: 0.7
+top_p: 0.95
+thinking_tag: "<think>"
+thinking_close_tag: "</think>"
+output_format: "thinking"
+output_name: "generated-deepseek-r1-70b"
