@@ -1,0 +1,43 @@
+# Qwen3.5-122B-A10B-BF16 LoRA — mac-port attention-only profile
+# Studio M3 Ultra 512 GB — wired-limit 448 GiB, mmap safetensors, grad-checkpoint ON
+# Attention-only LoRA (skip MoE experts) → avoids Metal OOM at iter 15 / peak 463 GB
+
+model: /Users/clems/KIKI-Mac_tunner/models/Qwen3.5-122B-A10B-BF16
+train: true
+data: /Users/clems/KIKI-Mac_tunner/data/final-opus-v3-1
+adapter_path: /Users/clems/KIKI-Mac_tunner/output/qwen35-122b-macport
+
+fine_tune_type: lora
+num_layers: -1
+
+lora_parameters:
+  rank: 64
+  scale: 64.0
+  dropout: 0.01
+  keys:
+    - "self_attn.q_proj"
+    - "self_attn.k_proj"
+    - "self_attn.v_proj"
+    - "self_attn.o_proj"
+
+optimizer: adamw
+learning_rate: 8.0e-6
+lr_schedule:
+  name: cosine_decay
+  warmup: 100
+  arguments: [8.0e-6, 3000, 8.0e-7]
+
+batch_size: 1
+grad_accum_steps: 8
+iters: 3000
+max_seq_length: 2048
+grad_checkpoint: true
+mask_prompt: true
+
+lazy: true
+seed: 42
+
+save_every: 250
+steps_per_eval: 250
+steps_per_report: 10
+val_batches: 20
