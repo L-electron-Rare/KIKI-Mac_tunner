@@ -1,7 +1,6 @@
-# Qwen3.5-122B-A10B-Opus-v3 — Notre creation
+# Qwen3.5-122B-A10B-Opus-v3 — Max qualite
 # MoE 122B total (10B actifs), fine-tune Opus reasoning
-# Premiere distillation Opus sur un modele 122B
-model: models/Qwen3.5-122B-A10B-4bit
+model: models/Qwen3.5-122B-A10B-BF16
 data: data/final-opus-v3
 train: true
 fine_tune_type: lora
@@ -9,10 +8,10 @@ optimizer: adamw
 num_layers: -1
 lora_parameters:
   rank: 64
-  scale: 2.0
-  dropout: 0.05
+  scale: 64.0
+  dropout: 0.01
 batch_size: 1
-iters: 2000
+iters: 3000
 val_batches: 5
 learning_rate: 8e-6
 steps_per_report: 5
