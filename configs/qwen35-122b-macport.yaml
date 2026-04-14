@@ -1,6 +1,6 @@
-# Qwen3.5-122B-A10B-BF16 LoRA — mac-port attention-only BOOSTED profile
-# Studio M3 Ultra 512 GB — wired-limit 448 GiB, mmap safetensors, grad-checkpoint ON
+# Qwen3.5-122B-A10B-BF16 LoRA — mac-port attention+linear_attn BOOSTED + cache-clear
 # 9 keys across 49 transformer blocks (13 full_attn + 36 linear_attn), no MoE experts.
+# clear_cache_threshold=10 to prevent Metal cache growth (fixed silent jetsam at iter 22).
 
 model: /Users/clems/KIKI-Mac_tunner/models/Qwen3.5-122B-A10B-BF16
 train: true
@@ -33,7 +33,7 @@ lr_schedule:
   arguments: [8.0e-6, 3000, 8.0e-7]
 
 batch_size: 1
-grad_accum_steps: 8
+grad_accumulation_steps: 8
 iters: 3000
 max_seq_length: 2048
 grad_checkpoint: true
@@ -42,7 +42,8 @@ mask_prompt: true
 lazy: true
 seed: 42
 
-save_every: 250
+clear_cache_threshold: 10
+save_every: 100
 steps_per_eval: 250
 steps_per_report: 10
 val_batches: 20
