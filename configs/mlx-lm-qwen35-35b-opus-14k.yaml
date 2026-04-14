@@ -9,7 +9,7 @@ fine_tune_type: lora
 optimizer: adamw
 num_layers: -1
 lora_parameters:
-  rank: 32
+  rank: 16
   scale: 2.0
   dropout: 0.05
 batch_size: 1
@@ -20,7 +20,7 @@ steps_per_report: 10
 steps_per_eval: 100
 save_every: 100
 grad_accumulation_steps: 8
-max_seq_length: 2048
+max_seq_length: 1024
 grad_checkpoint: true
 adapter_path: output/qwen35-35b-opus-14k-v1
 seed: 42
