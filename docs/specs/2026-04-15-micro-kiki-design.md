@@ -278,6 +278,119 @@ Inference : mlx-lm avec adapter switching
 | Latence routeur | < 10 ms |
 | Swap stack | < 2s |
 
+## Apple Silicon — Triple pipeline ANE+GPU+CPU (Mac uniquement)
+
+Sur le Mac M3 Ultra, l'ANE (Neural Engine) est libre quand le GPU fait l'inférence MoE. Trois intégrations exploitent cette ressource inutilisée.
+
+### Architecture triple pipeline
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    MAC M3 ULTRA 512 Go                        │
+│                                                               │
+│  ┌─────────────────┐  ┌──────────────────┐  ┌─────────────┐ │
+│  │   GPU METAL      │  │   ANE (32 cores)  │  │    CPU      │ │
+│  │   76 cores       │  │   ~2W, 14 tok/s   │  │  24 cores   │ │
+│  │                  │  │                    │  │             │ │
+│  │  Base Qwen3.5-4B │  │  A. Scorer GRPO   │  │  Routeur    │ │
+│  │  + 2-4 stacks    │  │  B. Draft 0.8B    │  │  sigmoid    │ │
+│  │  actifs          │  │     (speculative)  │  │  (5ms)      │ │
+│  │                  │  │  C. Meta-routeur   │  │             │ │
+│  │  Génération      │  │     + embedding    │  │  Offload    │ │
+│  │  principale      │  │                    │  │  stacks     │ │
+│  └─────────────────┘  └──────────────────┘  └─────────────┘ │
+│         ↕ mémoire unifiée (zero-copy)  ↕                      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### A. ANE comme scorer/filtre qualité
+
+Pendant le training GRPO (Phase 3), le GPU génère K=4 réponses par prompt.
+L'ANE score chaque réponse en parallèle via un reward model léger.
+
+```
+GPU : génère réponse[i+1]  ──────────────────────→
+ANE : score réponse[i]     ──→ reward = 0.85 ──→
+                               (14 tok/s)
+```
+
+| Composant | Unité | Modèle |
+|-----------|-------|--------|
+| Générateur | GPU Metal | Qwen3.5-4B + stacks MoE |
+| Scorer | ANE CoreML | Qwen3.5-0.8B converti CoreML |
+| Reward head | ANE | Linear(h_dim, 1) sur le scorer |
+
+Gain : **scoring gratuit** (0 impact sur la vitesse de génération GPU).
+
+### B. Speculative decoding via ANE
+
+Un draft model Qwen3.5-0.8B (0.5 Go) tourne sur ANE. Il propose N tokens,
+le GPU (4B + stacks) vérifie en un seul forward pass.
+
+```
+ANE (draft 0.8B) : propose tokens [t1, t2, t3, t4, t5]  → 200+ tok/s
+GPU (4B + stacks) : vérifie [t1✓, t2✓, t3✓, t4✗]       → 1 forward
+                    accepte 3 tokens au lieu de 1
+```
+
+| Métrique | Sans speculative | Avec speculative ANE |
+|----------|-----------------|---------------------|
+| tok/s GPU | ~30-50 | ~30-50 |
+| tok/s effectifs | ~30-50 | **~60-100** (2-3x) |
+| VRAM supplémentaire | 0 | 0 (ANE séparé) |
+
+Le draft 0.8B partage le même tokenizer que le 4B (même famille Qwen3.5).
+La conversion CoreML est prouvée (on a déjà converti le 9B DeltaNet).
+
+### C. ANE pour meta-routeur + embedding
+
+Le meta-routeur (2M params) et l'embedding layer sont des opérations légères
+qui peuvent tourner entièrement sur ANE, libérant le GPU pour les stacks MoE.
+
+```
+Prompt arrive
+  │
+  ▼
+ANE : embedding(tokens) → hidden states          (~0.5 ms)
+ANE : meta_routeur(hidden) → 32 sigmoid scores   (~2 ms)
+CPU : sélectionne top-4 stacks, charge du SSD     (~50 ms)
+  │
+  ▼
+GPU : forward(hidden, stacks actifs) → tokens     (bulk du compute)
+```
+
+Le forward GPU ne fait QUE le compute MoE lourd. Embedding + routing = gratuit sur ANE.
+
+### Modèles CoreML nécessaires
+
+| Modèle | Usage | Taille CoreML | Conversion |
+|--------|-------|--------------|------------|
+| Qwen3.5-0.8B | Draft speculative | ~1 Go | À faire (ANEMLL ou custom) |
+| Meta-routeur | Routing 32 stacks | ~8 Mo | Trivial (petit MLP) |
+| Embedding layer | Token → hidden | ~50 Mo | Trivial |
+| Reward scorer | GRPO scoring | ~1 Go | Clone du draft + reward head |
+
+**Note** : Le 0.8B Qwen3.5 utilise GatedDeltaNet comme le 4B/9B.
+Notre conversion DeltaNet → CoreML (Phase 1 ANE research) s'applique directement.
+
+### Quand utiliser le triple pipeline
+
+| Scénario | GPU | ANE | CPU | Gain |
+|----------|-----|-----|-----|------|
+| Inférence standard | 4B + stacks | Draft 0.8B (spec) | Routeur | **2-3x tok/s** |
+| Training GRPO | Génère K=4 | Score réponses | Routeur | **Scoring gratuit** |
+| Training SFT | Training LoRA | Idle | — | Pas de gain |
+| Batch scoring | Idle | Score dataset | — | **14 tok/s continu** |
+
+### Impact sur les critères de succès
+
+| Métrique | Sans ANE | Avec ANE |
+|----------|----------|----------|
+| Inférence tok/s | 30-50 | **60-100** (speculative) |
+| GRPO scoring overhead | +50% temps | **~0%** (parallèle) |
+| Latence routeur | ~5 ms CPU | **~2 ms ANE** |
+| Consommation | ~20W GPU seul | ~22W (GPU+ANE) |
+
 ## Risques
 
 | Risque | Mitigation |
