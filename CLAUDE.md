@@ -1,11 +1,11 @@
 # KIKI-Mac_tunner
 
-Fine-tuning de LLMs sur Apple Silicon (512 Go RAM unifiee) via MLX.
-Distille le raisonnement Claude Opus dans Mistral Large 123B, Mistral Small 24B, ou Qwen3.5-27B.
+Fine-tuning LLMs sur Apple Silicon (512 Go RAM unifiee) via MLX.
+Distille le raisonnement Claude Opus dans des modeles open-source.
 
 ## Machine
 
-M4 Pro, 512 Go memoire unifiee. MLX bf16 complet, ~800 GB/s bande passante.
+Mac Studio M3 Ultra, 512 Go memoire unifiee. MLX bf16 complet.
 
 ## Workflow
 
@@ -13,161 +13,33 @@ M4 Pro, 512 Go memoire unifiee. MLX bf16 complet, ~800 GB/s bande passante.
 ./setup.sh → ./download.sh → ./train.sh → ./export.sh
 ```
 
-| Script | Role |
-|--------|------|
-| `setup.sh` | Install venv + MLX + deps |
-| `download.sh` | Fetch modele + dataset depuis HF |
-| `train.sh` | Training LoRA (pause/resume via Ctrl+C + `--resume`) |
-| `export.sh` | Merge LoRA → GGUF → quantize Q6_K/Q8_0 |
-
 ## Where to Look
 
 | Tache | Emplacement |
 |-------|-------------|
-| Ajouter/modifier un modele cible | `configs/` |
-| Modifier le pipeline de training | `scripts/train_mlx.py` |
-| Modifier merge/export | `scripts/merge_lora.py`, `scripts/convert_gguf.py` |
-| Dataset | `data/` (JSONL chat format) |
-| Checkpoints et LoRA final | `output/<model-name>/` |
-| Generation configs | `configs/generation/` |
-| Data generation script | `scripts/generate_data.py` |
-| Dataset merger | `scripts/merge_datasets.py` |
-| Teacher model downloads | `scripts/download_teachers.sh` |
-| Dataset downloads | `scripts/download_datasets.sh` |
-| Dataset conversion | `scripts/convert_datasets.py` |
-| Conversion MLX | `scripts/convert_to_mlx.sh` |
-| Combined dataset prep | `scripts/prepare_combined_dataset.sh` |
-| Generation CPU (llama.cpp) | `scripts/generate_cpu.sh`, `scripts/generate_data_cpu.py` |
-| Distillation script | `scripts/distill_generate.py`, `distill.sh` |
-| Export GGUF pipeline | `scripts/export_gguf.sh` |
-| Modeles GGUF | `scripts/download_gguf.sh`, `models/gguf/` |
-| Recherche ANE hybrid | `research/ane-hybrid/`, `docs/plans/2026-04-14-ane-hybrid-pipeline.md` |
-| Pipeline complet 35B | `scripts/pipeline_35b.sh` |
-| Config fine-tune final | `configs/mlx-lm-qwen35-35b-opus-final.yaml` |
-| Ollama Modelfile | `output/gguf/Modelfile` |
+| Configs training/generation | `configs/` |
+| Scripts (training, distill, export) | `scripts/` |
+| Datasets | `data/` |
+| Checkpoints et LoRA | `output/` |
+| Recherche ANE hybrid | `research/ane-hybrid/` |
+| Plans d'implementation | `docs/plans/` |
+| Fork mlx_lm (SSD offload) | `lib/mlx_lm_fork/` |
+| Fork MLX (3x Metal limit) | `/tmp/mlx-fork` (installe dans venv) |
+| Modeles telecharges | `models/` |
 
 ## Dataset format
 
-Le dataset Opus utilise `problem/thinking/solution`, formate en chat :
+```json
+{"messages": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "<thinking>...</thinking>\n\n..."}]}
 ```
-user: {problem}
-assistant: <thinking>{thinking}</thinking>\n\n{solution}
-```
-
-## Reseau
-
-GGUF exportes → NFS `tank/models/` (kx6tm-23), accessibles par kxkm-ai (4090), Tower, Cils.
-
-## Multi-Model Pipeline
-
-### Phase 1: Telecharger et preparer le dataset elargi
-```
-./scripts/download_datasets.sh all                    # 3K + 10K + 12K Opus 4.6
-./scripts/prepare_combined_dataset.sh                  # Convertir, fusionner, dedupliquer → ~20K exemples
-```
-
-### Phase 1b (optionnel): Generer des donnees supplementaires avec teachers
-```
-./scripts/download_teachers.sh teachers-2026           # Qwen3.5-397B + 122B
-./generate.sh configs/generation/qwen35-122b.yaml --num-problems 5000
-python scripts/merge_datasets.py \
-  --sources combined-opus-20k generated-qwen35-122b \
-  --output combined-opus-25k --deduplicate
-```
-
-### Phase 2: Fine-tune le 123B sur le dataset elargi
-```
-mlx_lm.lora --config configs/mlx-lm-mistral-large.yaml  # Mettre data: data/combined-opus-20k
-```
-
-### Phase 3: Comparer avec d'autres students
-```
-mlx_lm.lora --config configs/mlx-lm-qwen35-122b.yaml    # MoE 122B thinking
-mlx_lm.lora --config configs/mlx-lm-devstral2-123b.yaml  # Dense 123B code
-mlx_lm.lora --config configs/mlx-lm-qwen35-27b-opus.yaml # 27B deja Opus
-```
-
-## Teacher Models (data generation)
-
-| Model | Size | VRAM | Config |
-|-------|------|------|--------|
-| DeepSeek-R1 671B | 671B MoE | ~335 GB (4-bit) | `configs/generation/deepseek-r1-671b.yaml` |
-| Qwen3-235B-A22B | 235B MoE | ~200 GB (bf16) | `configs/generation/qwen3-235b.yaml` |
-| Qwen3-72B | 72B | ~145 GB (bf16) | `configs/generation/qwen3-72b.yaml` |
-| DeepSeek-R1-Distill-70B | 70B | ~140 GB (bf16) | `configs/generation/deepseek-r1-distill-70b.yaml` |
-| Qwen3.5-397B-A17B | 397B MoE | ~350 GB (bf16) | `configs/generation/qwen35-397b.yaml` | Fev 2026 |
-| Qwen3.5-122B-A10B | 122B MoE | ~130 GB (bf16) | `configs/generation/qwen35-122b.yaml` | Fev 2026 |
-| Qwen3.5-27B-Opus-v2 | 27B | ~56 GB (bf16) | `configs/generation/qwen35-27b-opus.yaml` | Mars 2026 |
-| Qwen3.5-35B-A3B-Opus | 35B MoE (3B actifs) | ~70 GB (bf16) | `configs/generation/qwen35-35b-opus.yaml` | Mars 2026 |
-
-## Student Models (fine-tuning)
-
-| Model | Size | VRAM Training | Config |
-|-------|------|---------------|--------|
-| Mistral Large | 123B | ~270 GB | `configs/mlx-lm-mistral-large.yaml` |
-| Qwen3-72B | 72B | ~180 GB | `configs/mlx-lm-qwen3-72b.yaml` |
-| DeepSeek-R1-Distill-70B | 70B | ~175 GB | `configs/mlx-lm-deepseek-r1-distill-70b.yaml` |
-| QwQ-32B | 32B | ~100 GB | `configs/mlx-lm-qwq-32b.yaml` |
-| DeepSeek-R1-Distill-32B | 32B | ~100 GB | `configs/mlx-lm-deepseek-r1-distill-32b.yaml` |
-| Qwen3-235B-A22B | 235B MoE | ~350 GB | `configs/mlx-lm-qwen3-235b.yaml` |
-| Qwen3.5-397B-A17B | 397B MoE | ~400 GB | `configs/mlx-lm-qwen35-397b.yaml` | Fev 2026 |
-| Qwen3.5-122B-A10B | 122B MoE | ~180 GB | `configs/mlx-lm-qwen35-122b.yaml` | Fev 2026 |
-| Qwen3.5-27B-Opus-v2 | 27B | ~80 GB | `configs/mlx-lm-qwen35-27b-opus.yaml` | Mars 2026 |
-| Devstral 2 123B | 123B dense | ~270 GB | `configs/mlx-lm-devstral2-123b.yaml` | Dec 2025 |
-| Qwen3.5-35B-A3B-Opus | 35B MoE (3B actifs) | ~90 GB | `configs/mlx-lm-qwen35-35b-opus.yaml` | Mars 2026 |
-
-## Datasets Opus 4.6
-
-| Dataset | Taille | HuggingFace ID | Script |
-|---------|--------|----------------|--------|
-| Reasoning 3K (actuel) | 2326 ex | `nohurry/Opus-4.6-Reasoning-3000x-filtered` | — |
-| Opus 10K | ~10000 ex | `Roman1111111/claude-opus-4.6-10000x` | `download_datasets.sh opus-10k` |
-| Reasoning SFT 12K | ~12000 ex | `ykarout/Opus-4.6-reasoning-sft-12k` | `download_datasets.sh opus-12k` |
-| **Combine** | **~20K ex** | — | `prepare_combined_dataset.sh` |
-
-## Inference Parallele
-
-Pendant le training MLX (GPU), on peut generer des donnees en parallele :
-
-| Unite | Framework | Usage |
-|-------|-----------|-------|
-| GPU Metal (76 cores) | MLX | Training LoRA |
-| CPU (24 cores) | llama.cpp `--ngl 0` | Inference teacher GGUF |
-| Neural Engine (32 cores) | CoreML | Inference teacher quantifie |
-
-### Generation CPU (pendant le training)
-```
-./scripts/download_gguf.sh qwen35-35b-opus                    # GGUF Q4 (~20 Go)
-./scripts/generate_cpu.sh models/gguf/Qwen3.5-35B-A3B-Opus-Q4/*.gguf \
-    data/Opus-4.6-Reasoning-3000x-filtered/train.jsonl \
-    generated-cpu-35b \
-    5000
-```
-
-### Builds llama.cpp
-- CPU only : `/tmp/llama-cpp-cpu/build/bin/llama-cli`
-- GPU Metal : `/tmp/llama-cpp-gpu/build/bin/llama-cli`
-
-## Distillation 123B → 35B
-
-Pipeline pour distiller le Mistral Large 123B entraine dans un modele portable de ~20 Go.
-
-### Etape 1 : Generer les traces de distillation
-```
-./distill.sh --num-problems 5000
-```
-Utilise le 123B fuse (checkpoint 1100, val loss 0.479) pour generer des traces
-de raisonnement sur les problemes du dataset.
-
-### Etape 2 : Entrainer le student + exporter GGUF
-```
-# Mettre a jour data: dans configs/mlx-lm-qwen35-35b-opus.yaml → data/distilled-mistral-large-123b
-./scripts/export_gguf.sh all
-```
-Produit un GGUF Q4_K_M de ~20 Go deployable partout (Ollama, llama.cpp, LM Studio).
 
 ## Anti-Patterns
 
 - Ne pas fine-tuner en 4-bit — bf16 est gratuit avec 512 Go
-- Ne pas utiliser PyTorch MPS — MLX est 3-5x plus rapide sur M4
+- Ne pas utiliser PyTorch MPS — MLX est 3-5x plus rapide
 - Ne pas oublier `--resume` apres un Ctrl+C
+- `huggingface-cli` deprecated → utiliser `hf`
+- `mlx_lm.convert --dtype bf16` → `--dtype bfloat16`
+- Pour le 122B : utiliser `mlx-tune` (0.4.21+), pas `mlx_lm.lora` directement
+- MLX stock limite les Metal buffers a 499K → le fork 3x (`/tmp/mlx-fork`) est requis pour 122B bf16
+- `iogpu.wired_limit_mb=458752` obligatoire avant training 122B (sinon OOM kernel)

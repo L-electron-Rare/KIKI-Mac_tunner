@@ -1,7 +1,7 @@
 # Qwen3.5-122B-A10B-Opus-v3 — Max qualite
 # MoE 122B total (10B actifs), fine-tune Opus reasoning
 model: models/Qwen3.5-122B-A10B-BF16
-data: data/final-opus-v3
+data: data/final-opus-v3-1
 train: true
 fine_tune_type: lora
 optimizer: adamw
@@ -17,8 +17,9 @@ learning_rate: 8e-6
 steps_per_report: 5
 steps_per_eval: 50
 save_every: 50
-grad_accumulation_steps: 4
-max_seq_length: 2048
+grad_accumulation_steps: 8
+max_seq_length: 1280
 grad_checkpoint: true
+clear_cache_threshold: 2
 adapter_path: output/qwen35-122b-opus-v3
 seed: 42
