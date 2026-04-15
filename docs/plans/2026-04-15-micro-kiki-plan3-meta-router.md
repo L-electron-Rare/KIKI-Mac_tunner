@@ -1,4 +1,4 @@
-# Meta-Router (32 Sigmoid) Implementation Plan
+# Plan 3: Meta-Router (32 Sigmoid) — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -25,8 +25,9 @@
 | `scripts/micro_kiki/train_router.py` | Training loop: BCE loss, cosine LR, 8 epochs, confidence margin penalty |
 | `scripts/micro_kiki/stack_manager.py` | Disk-offloaded stack loading with LRU cache |
 | `scripts/micro_kiki/inference.py` | Full inference pipeline: tokenize -> extract hidden -> route -> load stacks -> forward |
+| `scripts/micro_kiki/validate.py` | Validation suite: latency, accuracy, param count, chat floor |
+| `configs/micro-kiki-router.yaml` | Router training hyperparameters |
 | `tests/micro_kiki/__init__.py` | Test package init |
-| `tests/micro_kiki/test_constants.py` | Test domain list and threshold values |
 | `tests/micro_kiki/test_meta_router.py` | Test router forward, output shapes, sigmoid range, gradient flow |
 | `tests/micro_kiki/test_hidden_extractor.py` | Test hidden state extraction shapes and blending |
 | `tests/micro_kiki/test_outcome_discovery.py` | Test target generation logic with mock model |
@@ -34,27 +35,38 @@
 | `tests/micro_kiki/test_train_router.py` | Test training step, loss decrease, checkpoint save/load |
 | `tests/micro_kiki/test_stack_manager.py` | Test LRU cache behavior, load/unload |
 | `tests/micro_kiki/test_inference.py` | Test end-to-end inference pipeline with mocks |
-| `configs/micro-kiki-router.yaml` | Router training hyperparameters |
 | `output/micro-kiki/router/` | Saved router weights (router.safetensors) |
 
 ---
 
-### Task 1: Constants and Configuration
+## Task 1: Router Model Architecture
+
+Build the MetaRouter nn.Module, constants, config, and hidden state extractor. This is the foundational model that takes a blended hidden state (3072-dim) and outputs 32 independent sigmoid scores.
 
 **Files:**
 - Create: `scripts/micro_kiki/__init__.py`
 - Create: `scripts/micro_kiki/constants.py`
+- Create: `scripts/micro_kiki/meta_router.py`
+- Create: `scripts/micro_kiki/hidden_extractor.py`
 - Create: `configs/micro-kiki-router.yaml`
 - Create: `tests/micro_kiki/__init__.py`
-- Create: `tests/micro_kiki/test_constants.py`
+- Create: `tests/micro_kiki/test_meta_router.py`
+- Create: `tests/micro_kiki/test_hidden_extractor.py`
 
-- [ ] **Step 1: Write the failing test for constants**
+- [ ] **Step 1: Write the failing tests for constants and router**
 
 ```python
-# tests/micro_kiki/test_constants.py
-"""Tests for micro_kiki constants."""
-import pytest
+# tests/micro_kiki/__init__.py
+```
 
+```python
+# tests/micro_kiki/test_meta_router.py
+"""Tests for the MetaRouter nn.Module and constants."""
+import pytest
+import torch
+
+
+# --- Constants tests ---
 
 def test_domain_names_length():
     from scripts.micro_kiki.constants import DOMAIN_NAMES
@@ -124,11 +136,229 @@ def test_discovery_prior_blend():
     from scripts.micro_kiki.constants import DISCOVERY_WEIGHT, PRIOR_WEIGHT
     assert abs(DISCOVERY_WEIGHT - 0.80) < 1e-6
     assert abs(PRIOR_WEIGHT - 0.20) < 1e-6
+
+
+# --- MetaRouter tests ---
+
+@pytest.fixture
+def router():
+    from scripts.micro_kiki.meta_router import MetaRouter
+    return MetaRouter(
+        h_dim=3072,
+        hidden_dim=512,
+        num_domains=32,
+        dropout=0.1,
+        temperature_init=1.0,
+    )
+
+
+@pytest.fixture
+def dummy_hidden():
+    """Batch of 4 sequences, each a single pooled vector of dim 3072."""
+    return torch.randn(4, 3072)
+
+
+class TestMetaRouterShape:
+    def test_output_shape(self, router, dummy_hidden):
+        scores = router(dummy_hidden)
+        assert scores.shape == (4, 32)
+
+    def test_output_range_sigmoid(self, router, dummy_hidden):
+        scores = router(dummy_hidden)
+        assert (scores >= 0.0).all()
+        assert (scores <= 1.0).all()
+
+    def test_single_sample(self, router):
+        h = torch.randn(1, 3072)
+        scores = router(h)
+        assert scores.shape == (1, 32)
+
+    def test_large_batch(self, router):
+        h = torch.randn(64, 3072)
+        scores = router(h)
+        assert scores.shape == (64, 32)
+
+
+class TestMetaRouterGradients:
+    def test_gradients_flow(self, router, dummy_hidden):
+        dummy_hidden.requires_grad_(True)
+        scores = router(dummy_hidden)
+        loss = scores.sum()
+        loss.backward()
+        assert dummy_hidden.grad is not None
+        assert dummy_hidden.grad.shape == (4, 3072)
+
+    def test_all_parameters_have_gradients(self, router, dummy_hidden):
+        scores = router(dummy_hidden)
+        loss = scores.sum()
+        loss.backward()
+        for name, param in router.named_parameters():
+            assert param.grad is not None, f"No gradient for {name}"
+
+
+class TestMetaRouterComponents:
+    def test_temperature_is_learnable(self, router):
+        assert hasattr(router, "temperature")
+        assert router.temperature.requires_grad
+
+    def test_temperature_positive(self, router):
+        temp = router.get_temperature()
+        assert temp.item() > 0
+
+    def test_domain_queries_shape(self, router):
+        assert router.domain_queries.shape == (32, 512)
+
+    def test_global_query_shape(self, router):
+        assert router.global_query.shape == (1, 512)
+
+    def test_projection_reduces_dim(self, router):
+        h = torch.randn(2, 3072)
+        projected = router.input_proj(h)
+        assert projected.shape == (2, 512)
+
+
+class TestMetaRouterDeterminism:
+    def test_eval_mode_deterministic(self, router):
+        router.eval()
+        h = torch.randn(2, 3072)
+        with torch.no_grad():
+            s1 = router(h)
+            s2 = router(h)
+        assert torch.allclose(s1, s2)
+
+
+class TestMetaRouterParamCount:
+    def test_under_2m_params(self, router):
+        total = sum(p.numel() for p in router.parameters())
+        assert total < 2_000_000, f"Router has {total:,} params, expected < 2M"
+
+    def test_over_500k_params(self, router):
+        total = sum(p.numel() for p in router.parameters())
+        assert total > 500_000, f"Router has {total:,} params, expected > 500K"
+
+
+class TestGetActiveStacks:
+    def test_max_active_respected(self, router):
+        scores = torch.ones(1, 32)  # All high
+        active = router.get_active_stacks(scores, max_active=4)
+        assert len(active[0]) <= 4
+
+    def test_chat_floor_applied(self, router):
+        scores = torch.zeros(1, 32)  # All zero
+        active = router.get_active_stacks(
+            scores, gate_threshold=0.12, chat_floor=0.20, max_active=4
+        )
+        domain_indices = {idx for idx, _ in active[0]}
+        assert 0 in domain_indices  # chat-fr always present via floor
+
+    def test_below_threshold_excluded(self, router):
+        scores = torch.full((1, 32), 0.05)  # All below threshold
+        scores[0, 0] = 0.01  # Even chat-fr raw is below
+        active = router.get_active_stacks(
+            scores, gate_threshold=0.12, chat_floor=0.20, max_active=4
+        )
+        # Only chat-fr (via floor) should be active
+        assert len(active[0]) == 1
+        assert active[0][0][0] == 0
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+```python
+# tests/micro_kiki/test_hidden_extractor.py
+"""Tests for hidden state extraction from base model."""
+import pytest
+import torch
+import torch.nn as nn
 
-Run: `cd /Users/clems/KIKI-Mac_tunner && .venv/bin/python -m pytest tests/micro_kiki/test_constants.py -v`
+
+class MockQwenModel(nn.Module):
+    """Minimal mock of Qwen3.5-4B for hidden state extraction."""
+
+    def __init__(self, num_layers: int = 40, h_dim: int = 3072):
+        super().__init__()
+        self.config = type("Config", (), {
+            "num_hidden_layers": num_layers,
+            "hidden_size": h_dim,
+        })()
+        self.num_layers = num_layers
+        self.h_dim = h_dim
+
+    def forward(self, input_ids, output_hidden_states=True, **kwargs):
+        batch_size, seq_len = input_ids.shape
+        hidden_states = tuple(
+            torch.randn(batch_size, seq_len, self.h_dim)
+            for _ in range(self.num_layers + 1)
+        )
+        return type("Output", (), {
+            "hidden_states": hidden_states,
+            "logits": torch.randn(batch_size, seq_len, 32000),
+        })()
+
+
+@pytest.fixture
+def mock_model():
+    return MockQwenModel(num_layers=40, h_dim=3072)
+
+
+class TestBlendHiddenStates:
+    def test_output_shape(self, mock_model):
+        from scripts.micro_kiki.hidden_extractor import extract_blended_hidden
+        input_ids = torch.randint(0, 32000, (2, 64))
+        blended = extract_blended_hidden(mock_model, input_ids)
+        assert blended.shape == (2, 3072)
+
+    def test_single_sample(self, mock_model):
+        from scripts.micro_kiki.hidden_extractor import extract_blended_hidden
+        input_ids = torch.randint(0, 32000, (1, 32))
+        blended = extract_blended_hidden(mock_model, input_ids)
+        assert blended.shape == (1, 3072)
+
+    def test_custom_weights(self, mock_model):
+        from scripts.micro_kiki.hidden_extractor import extract_blended_hidden
+        input_ids = torch.randint(0, 32000, (2, 64))
+        blended = extract_blended_hidden(
+            mock_model, input_ids,
+            mid_weight=0.5, last_weight=0.5,
+        )
+        assert blended.shape == (2, 3072)
+
+    def test_weights_must_sum_to_one(self):
+        from scripts.micro_kiki.hidden_extractor import extract_blended_hidden
+        model = MockQwenModel()
+        input_ids = torch.randint(0, 32000, (1, 32))
+        with pytest.raises(ValueError, match="must sum to 1.0"):
+            extract_blended_hidden(model, input_ids, mid_weight=0.3, last_weight=0.3)
+
+
+class TestMidLayerIndex:
+    def test_mid_layer_is_half(self, mock_model):
+        from scripts.micro_kiki.hidden_extractor import get_mid_layer_index
+        assert get_mid_layer_index(mock_model) == 20
+
+    def test_mid_layer_odd_count(self):
+        from scripts.micro_kiki.hidden_extractor import get_mid_layer_index
+        model = MockQwenModel(num_layers=41)
+        assert get_mid_layer_index(model) == 20
+
+
+class TestPoolingStrategy:
+    def test_last_token_pooling(self):
+        from scripts.micro_kiki.hidden_extractor import pool_last_token
+        hidden = torch.randn(2, 10, 3072)
+        pooled = pool_last_token(hidden)
+        assert pooled.shape == (2, 3072)
+        assert torch.allclose(pooled, hidden[:, -1, :])
+
+    def test_mean_pooling(self):
+        from scripts.micro_kiki.hidden_extractor import pool_mean
+        hidden = torch.ones(2, 10, 3072)
+        pooled = pool_mean(hidden)
+        assert pooled.shape == (2, 3072)
+        assert torch.allclose(pooled, torch.ones(2, 3072))
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `cd /Users/clems/KIKI-Mac_tunner && .venv/bin/python -m pytest tests/micro_kiki/test_meta_router.py tests/micro_kiki/test_hidden_extractor.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'scripts.micro_kiki'`
 
 - [ ] **Step 3: Create package init files**
@@ -136,10 +366,6 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'scripts.micro_kiki'`
 ```python
 # scripts/micro_kiki/__init__.py
 """Micro-KIKI: 32-domain Brainstacks MoE with sigmoid meta-router."""
-```
-
-```python
-# tests/micro_kiki/__init__.py
 ```
 
 - [ ] **Step 4: Write constants module**
@@ -220,189 +446,7 @@ ROUTER_WEIGHTS_FILE: str = "router.safetensors"
 BASE_MODEL_PATH: str = "models/Qwen3.5-4B"
 ```
 
-- [ ] **Step 5: Write the config YAML**
-
-```yaml
-# configs/micro-kiki-router.yaml
-# Meta-router training configuration for 32-domain Brainstacks
-
-model:
-  base_model_path: "models/Qwen3.5-4B"
-  stacks_dir: "output/micro-kiki/stacks"
-  router_dir: "output/micro-kiki/router"
-  h_dim: 3072
-  router_hidden_dim: 512
-  num_domains: 32
-
-hidden_extraction:
-  mid_layer_weight: 0.45
-  last_layer_weight: 0.55
-  # Mid layer index computed as num_layers // 2 at runtime
-
-training:
-  num_epochs: 8
-  batch_size: 16
-  learning_rate: 3.0e-4
-  weight_decay: 0.01
-  warmup_ratio: 0.1
-  lr_scheduler: "cosine"
-  dropout: 0.1
-  temperature_init: 1.0
-  max_seq_len: 512  # For hidden state extraction (router only needs summary)
-  gradient_clip: 1.0
-
-outcome_discovery:
-  loss_improvement_threshold: 0.01
-  discovery_weight: 0.80
-  prior_weight: 0.20
-  max_prompts: 5000  # Subset of mixed dataset for discovery
-  cache_dir: "output/micro-kiki/discovery_cache"
-
-inference:
-  gate_threshold: 0.12
-  chat_floor: 0.20
-  max_active_stacks: 4
-  lru_cache_size: 6  # Keep up to 6 stacks in memory
-
-data:
-  mixed_dataset_path: "data/micro-kiki/mixed"
-  discovery_targets_path: "data/micro-kiki/router_targets.pt"
-```
-
-- [ ] **Step 6: Run tests to verify they pass**
-
-Run: `cd /Users/clems/KIKI-Mac_tunner && .venv/bin/python -m pytest tests/micro_kiki/test_constants.py -v`
-Expected: All 13 tests PASS
-
-- [ ] **Step 7: Commit**
-
-```bash
-cd /Users/clems/KIKI-Mac_tunner
-git add scripts/micro_kiki/__init__.py scripts/micro_kiki/constants.py configs/micro-kiki-router.yaml tests/micro_kiki/__init__.py tests/micro_kiki/test_constants.py
-git commit -m "feat(micro-kiki): add constants, config, and domain registry for 32-stack meta-router"
-```
-
----
-
-### Task 2: Router Model Architecture
-
-**Files:**
-- Create: `scripts/micro_kiki/meta_router.py`
-- Create: `tests/micro_kiki/test_meta_router.py`
-
-- [ ] **Step 1: Write the failing tests**
-
-```python
-# tests/micro_kiki/test_meta_router.py
-"""Tests for the MetaRouter nn.Module."""
-import pytest
-import torch
-
-
-@pytest.fixture
-def router():
-    from scripts.micro_kiki.meta_router import MetaRouter
-    return MetaRouter(
-        h_dim=3072,
-        hidden_dim=512,
-        num_domains=32,
-        dropout=0.1,
-        temperature_init=1.0,
-    )
-
-
-@pytest.fixture
-def dummy_hidden():
-    """Batch of 4 sequences, each a single pooled vector of dim 3072."""
-    return torch.randn(4, 3072)
-
-
-class TestMetaRouterShape:
-    def test_output_shape(self, router, dummy_hidden):
-        scores = router(dummy_hidden)
-        assert scores.shape == (4, 32)
-
-    def test_output_range_sigmoid(self, router, dummy_hidden):
-        scores = router(dummy_hidden)
-        assert (scores >= 0.0).all()
-        assert (scores <= 1.0).all()
-
-    def test_single_sample(self, router):
-        h = torch.randn(1, 3072)
-        scores = router(h)
-        assert scores.shape == (1, 32)
-
-    def test_large_batch(self, router):
-        h = torch.randn(64, 3072)
-        scores = router(h)
-        assert scores.shape == (64, 32)
-
-
-class TestMetaRouterGradients:
-    def test_gradients_flow(self, router, dummy_hidden):
-        dummy_hidden.requires_grad_(True)
-        scores = router(dummy_hidden)
-        loss = scores.sum()
-        loss.backward()
-        assert dummy_hidden.grad is not None
-        assert dummy_hidden.grad.shape == (4, 3072)
-
-    def test_all_parameters_have_gradients(self, router, dummy_hidden):
-        scores = router(dummy_hidden)
-        loss = scores.sum()
-        loss.backward()
-        for name, param in router.named_parameters():
-            assert param.grad is not None, f"No gradient for {name}"
-
-
-class TestMetaRouterComponents:
-    def test_temperature_is_learnable(self, router):
-        assert hasattr(router, "temperature")
-        assert router.temperature.requires_grad
-
-    def test_temperature_positive(self, router):
-        # Temperature stored as log to ensure positivity
-        temp = router.get_temperature()
-        assert temp.item() > 0
-
-    def test_domain_queries_shape(self, router):
-        assert router.domain_queries.shape == (32, 512)
-
-    def test_global_query_shape(self, router):
-        assert router.global_query.shape == (1, 512)
-
-    def test_projection_reduces_dim(self, router):
-        h = torch.randn(2, 3072)
-        projected = router.input_proj(h)
-        assert projected.shape == (2, 512)
-
-
-class TestMetaRouterDeterminism:
-    def test_eval_mode_deterministic(self, router):
-        router.eval()
-        h = torch.randn(2, 3072)
-        with torch.no_grad():
-            s1 = router(h)
-            s2 = router(h)
-        assert torch.allclose(s1, s2)
-
-
-class TestMetaRouterParamCount:
-    def test_under_2m_params(self, router):
-        total = sum(p.numel() for p in router.parameters())
-        assert total < 2_000_000, f"Router has {total:,} params, expected < 2M"
-
-    def test_over_500k_params(self, router):
-        total = sum(p.numel() for p in router.parameters())
-        assert total > 500_000, f"Router has {total:,} params, expected > 500K"
-```
-
-- [ ] **Step 2: Run tests to verify they fail**
-
-Run: `cd /Users/clems/KIKI-Mac_tunner && .venv/bin/python -m pytest tests/micro_kiki/test_meta_router.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'scripts.micro_kiki.meta_router'`
-
-- [ ] **Step 3: Write the MetaRouter module**
+- [ ] **Step 5: Write the MetaRouter module**
 
 ```python
 # scripts/micro_kiki/meta_router.py
@@ -446,8 +490,7 @@ class GlobalAttentionPool(nn.Module):
             (batch, dim) -- attention-weighted representation.
         """
         # Treat each sample as a length-1 sequence for the attention mechanism
-        # x: (B, D) -> (B, 1, D)
-        x_seq = x.unsqueeze(1)
+        x_seq = x.unsqueeze(1)  # (B, 1, D)
         k = self.key_proj(x_seq)  # (B, 1, D)
         v = self.value_proj(x_seq)  # (B, 1, D)
         q = self.query.expand(x.size(0), -1, -1)  # (B, 1, D)
@@ -508,7 +551,6 @@ class MLPFusion(nn.Module):
         Returns:
             (batch, num_domains) -- raw logits (pre-sigmoid).
         """
-        # Apply MLP independently per domain
         h = self.fc1(x)  # (B, num_domains, dim//2)
         h = F.gelu(h)
         h = self.dropout(h)
@@ -659,130 +701,7 @@ class MetaRouter(nn.Module):
         return batch_results
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `cd /Users/clems/KIKI-Mac_tunner && .venv/bin/python -m pytest tests/micro_kiki/test_meta_router.py -v`
-Expected: All 12 tests PASS
-
-- [ ] **Step 5: Commit**
-
-```bash
-cd /Users/clems/KIKI-Mac_tunner
-git add scripts/micro_kiki/meta_router.py tests/micro_kiki/test_meta_router.py
-git commit -m "feat(micro-kiki): implement MetaRouter nn.Module with attention + 32 sigmoid gating"
-```
-
----
-
-### Task 3: Hidden State Extractor
-
-**Files:**
-- Create: `scripts/micro_kiki/hidden_extractor.py`
-- Create: `tests/micro_kiki/test_hidden_extractor.py`
-
-- [ ] **Step 1: Write the failing tests**
-
-```python
-# tests/micro_kiki/test_hidden_extractor.py
-"""Tests for hidden state extraction from base model."""
-import pytest
-import torch
-import torch.nn as nn
-
-
-class MockQwenModel(nn.Module):
-    """Minimal mock of Qwen3.5-4B for hidden state extraction."""
-
-    def __init__(self, num_layers: int = 40, h_dim: int = 3072):
-        super().__init__()
-        self.config = type("Config", (), {
-            "num_hidden_layers": num_layers,
-            "hidden_size": h_dim,
-        })()
-        self.num_layers = num_layers
-        self.h_dim = h_dim
-
-    def forward(self, input_ids, output_hidden_states=True, **kwargs):
-        batch_size, seq_len = input_ids.shape
-        # Simulate hidden states for all layers (including embedding)
-        hidden_states = tuple(
-            torch.randn(batch_size, seq_len, self.h_dim)
-            for _ in range(self.num_layers + 1)
-        )
-        return type("Output", (), {
-            "hidden_states": hidden_states,
-            "logits": torch.randn(batch_size, seq_len, 32000),
-        })()
-
-
-@pytest.fixture
-def mock_model():
-    return MockQwenModel(num_layers=40, h_dim=3072)
-
-
-class TestBlendHiddenStates:
-    def test_output_shape(self, mock_model):
-        from scripts.micro_kiki.hidden_extractor import extract_blended_hidden
-        input_ids = torch.randint(0, 32000, (2, 64))
-        blended = extract_blended_hidden(mock_model, input_ids)
-        assert blended.shape == (2, 3072)
-
-    def test_single_sample(self, mock_model):
-        from scripts.micro_kiki.hidden_extractor import extract_blended_hidden
-        input_ids = torch.randint(0, 32000, (1, 32))
-        blended = extract_blended_hidden(mock_model, input_ids)
-        assert blended.shape == (1, 3072)
-
-    def test_custom_weights(self, mock_model):
-        from scripts.micro_kiki.hidden_extractor import extract_blended_hidden
-        input_ids = torch.randint(0, 32000, (2, 64))
-        blended = extract_blended_hidden(
-            mock_model, input_ids,
-            mid_weight=0.5, last_weight=0.5,
-        )
-        assert blended.shape == (2, 3072)
-
-    def test_weights_must_sum_to_one(self):
-        from scripts.micro_kiki.hidden_extractor import extract_blended_hidden
-        model = MockQwenModel()
-        input_ids = torch.randint(0, 32000, (1, 32))
-        with pytest.raises(ValueError, match="must sum to 1.0"):
-            extract_blended_hidden(model, input_ids, mid_weight=0.3, last_weight=0.3)
-
-
-class TestMidLayerIndex:
-    def test_mid_layer_is_half(self, mock_model):
-        from scripts.micro_kiki.hidden_extractor import get_mid_layer_index
-        assert get_mid_layer_index(mock_model) == 20
-
-    def test_mid_layer_odd_count(self):
-        from scripts.micro_kiki.hidden_extractor import get_mid_layer_index
-        model = MockQwenModel(num_layers=41)
-        assert get_mid_layer_index(model) == 20
-
-
-class TestPoolingStrategy:
-    def test_last_token_pooling(self):
-        from scripts.micro_kiki.hidden_extractor import pool_last_token
-        hidden = torch.randn(2, 10, 3072)
-        pooled = pool_last_token(hidden)
-        assert pooled.shape == (2, 3072)
-        assert torch.allclose(pooled, hidden[:, -1, :])
-
-    def test_mean_pooling(self):
-        from scripts.micro_kiki.hidden_extractor import pool_mean
-        hidden = torch.ones(2, 10, 3072)
-        pooled = pool_mean(hidden)
-        assert pooled.shape == (2, 3072)
-        assert torch.allclose(pooled, torch.ones(2, 3072))
-```
-
-- [ ] **Step 2: Run tests to verify they fail**
-
-Run: `cd /Users/clems/KIKI-Mac_tunner && .venv/bin/python -m pytest tests/micro_kiki/test_hidden_extractor.py -v`
-Expected: FAIL with `ModuleNotFoundError`
-
-- [ ] **Step 3: Write the hidden extractor module**
+- [ ] **Step 6: Write the hidden state extractor**
 
 ```python
 # scripts/micro_kiki/hidden_extractor.py
@@ -874,22 +793,73 @@ def extract_blended_hidden(
     return blended
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [ ] **Step 7: Write the config YAML**
 
-Run: `cd /Users/clems/KIKI-Mac_tunner && .venv/bin/python -m pytest tests/micro_kiki/test_hidden_extractor.py -v`
-Expected: All 7 tests PASS
+```yaml
+# configs/micro-kiki-router.yaml
+# Meta-router training configuration for 32-domain Brainstacks
 
-- [ ] **Step 5: Commit**
+model:
+  base_model_path: "models/Qwen3.5-4B"
+  stacks_dir: "output/micro-kiki/stacks"
+  router_dir: "output/micro-kiki/router"
+  h_dim: 3072
+  router_hidden_dim: 512
+  num_domains: 32
+
+hidden_extraction:
+  mid_layer_weight: 0.45
+  last_layer_weight: 0.55
+  # Mid layer index computed as num_layers // 2 at runtime
+
+training:
+  num_epochs: 8
+  batch_size: 16
+  learning_rate: 3.0e-4
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  lr_scheduler: "cosine"
+  dropout: 0.1
+  temperature_init: 1.0
+  max_seq_len: 512  # For hidden state extraction (router only needs summary)
+  gradient_clip: 1.0
+
+outcome_discovery:
+  loss_improvement_threshold: 0.01
+  discovery_weight: 0.80
+  prior_weight: 0.20
+  max_prompts: 5000  # Subset of mixed dataset for discovery
+  cache_dir: "output/micro-kiki/discovery_cache"
+
+inference:
+  gate_threshold: 0.12
+  chat_floor: 0.20
+  max_active_stacks: 4
+  lru_cache_size: 6  # Keep up to 6 stacks in memory
+
+data:
+  mixed_dataset_path: "data/micro-kiki/mixed"
+  discovery_targets_path: "data/micro-kiki/router_targets.pt"
+```
+
+- [ ] **Step 8: Run tests to verify they pass**
+
+Run: `cd /Users/clems/KIKI-Mac_tunner && .venv/bin/python -m pytest tests/micro_kiki/test_meta_router.py tests/micro_kiki/test_hidden_extractor.py -v`
+Expected: All tests PASS
+
+- [ ] **Step 9: Commit**
 
 ```bash
 cd /Users/clems/KIKI-Mac_tunner
-git add scripts/micro_kiki/hidden_extractor.py tests/micro_kiki/test_hidden_extractor.py
-git commit -m "feat(micro-kiki): add hidden state extractor with mid/last layer blending"
+git add scripts/micro_kiki/__init__.py scripts/micro_kiki/constants.py scripts/micro_kiki/meta_router.py scripts/micro_kiki/hidden_extractor.py configs/micro-kiki-router.yaml tests/micro_kiki/__init__.py tests/micro_kiki/test_meta_router.py tests/micro_kiki/test_hidden_extractor.py
+git commit -m "feat(micro-kiki): add MetaRouter model, constants, hidden extractor, and config"
 ```
 
 ---
 
-### Task 4: Outcome Discovery Data Generation
+## Task 2: Outcome Discovery
+
+Generate training targets for the router by measuring which stacks reduce loss on each prompt. For each prompt: compute base-only loss, then per-stack loss (32 forwards), then greedy-select improving stacks, and blend 80% discovery + 20% prior label.
 
 **Files:**
 - Create: `scripts/micro_kiki/outcome_discovery.py`
@@ -928,25 +898,6 @@ class MockBaseModel(nn.Module):
             "loss": loss,
             "logits": torch.randn(batch_size, seq_len, 32000),
             "hidden_states": hidden_states,
-        })()
-
-
-class MockStackModel(nn.Module):
-    """Mock model with a stack applied that gives a different loss."""
-
-    def __init__(self, loss: float):
-        super().__init__()
-        self.stack_loss = loss
-        self.config = type("Config", (), {
-            "num_hidden_layers": 40,
-            "hidden_size": 3072,
-        })()
-
-    def forward(self, input_ids, labels=None, **kwargs):
-        batch_size, seq_len = input_ids.shape
-        return type("Output", (), {
-            "loss": torch.tensor(self.stack_loss),
-            "logits": torch.randn(batch_size, seq_len, 32000),
         })()
 
 
@@ -1073,7 +1024,6 @@ This generates the supervision signal for training the meta-router.
 """
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from typing import Callable
@@ -1310,7 +1260,9 @@ git commit -m "feat(micro-kiki): add outcome discovery for router training targe
 
 ---
 
-### Task 5: Router Dataset and Training Loop
+## Task 3: Router Training Loop
+
+Build the dataset loader for pre-computed discovery targets and the full training loop with BCE + confidence margin penalty, cosine LR with warmup, checkpointing, and safetensors export.
 
 **Files:**
 - Create: `scripts/micro_kiki/router_dataset.py`
@@ -1379,73 +1331,7 @@ class TestRouterDataset:
         assert len(val_ds) == 10
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
-
-Run: `cd /Users/clems/KIKI-Mac_tunner && .venv/bin/python -m pytest tests/micro_kiki/test_router_dataset.py -v`
-Expected: FAIL with `ModuleNotFoundError`
-
-- [ ] **Step 3: Write the RouterDataset**
-
-```python
-# scripts/micro_kiki/router_dataset.py
-"""
-Dataset for training the meta-router.
-
-Loads pre-computed hidden states and target vectors from outcome discovery.
-"""
-from __future__ import annotations
-
-from pathlib import Path
-
-import torch
-from torch.utils.data import Dataset, Subset
-
-
-class RouterDataset(Dataset):
-    """
-    Dataset of (hidden_state, target_vector) pairs for router training.
-
-    The data file is a .pt dict with:
-        - "hidden_states": (N, 3072) float tensor
-        - "targets": (N, 32) float tensor in [0, 1]
-    """
-
-    def __init__(self, data_path: str | Path) -> None:
-        data = torch.load(data_path, weights_only=True)
-        self.hidden_states: torch.Tensor = data["hidden_states"].float()
-        self.targets: torch.Tensor = data["targets"].float()
-        assert self.hidden_states.size(0) == self.targets.size(0)
-
-    def __len__(self) -> int:
-        return self.hidden_states.size(0)
-
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.hidden_states[idx], self.targets[idx]
-
-    def split(
-        self, val_ratio: float = 0.1
-    ) -> tuple["RouterDataset", "RouterDataset"]:
-        """
-        Split into train/val subsets deterministically.
-
-        Returns Subset wrappers, not new RouterDataset instances,
-        to avoid data duplication.
-        """
-        n = len(self)
-        val_size = int(n * val_ratio)
-        train_size = n - val_size
-        indices = list(range(n))
-        train_indices = indices[:train_size]
-        val_indices = indices[train_size:]
-        return Subset(self, train_indices), Subset(self, val_indices)
-```
-
-- [ ] **Step 4: Run dataset tests to verify they pass**
-
-Run: `cd /Users/clems/KIKI-Mac_tunner && .venv/bin/python -m pytest tests/micro_kiki/test_router_dataset.py -v`
-Expected: All 5 tests PASS
-
-- [ ] **Step 5: Write the failing tests for training loop**
+- [ ] **Step 2: Write the failing tests for training loop**
 
 ```python
 # tests/micro_kiki/test_train_router.py
@@ -1554,7 +1440,68 @@ class TestTrainRouter:
         ).exists()
 ```
 
-- [ ] **Step 6: Write the training module**
+- [ ] **Step 3: Run tests to verify they fail**
+
+Run: `cd /Users/clems/KIKI-Mac_tunner && .venv/bin/python -m pytest tests/micro_kiki/test_router_dataset.py tests/micro_kiki/test_train_router.py -v`
+Expected: FAIL with `ModuleNotFoundError`
+
+- [ ] **Step 4: Write the RouterDataset**
+
+```python
+# scripts/micro_kiki/router_dataset.py
+"""
+Dataset for training the meta-router.
+
+Loads pre-computed hidden states and target vectors from outcome discovery.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+import torch
+from torch.utils.data import Dataset, Subset
+
+
+class RouterDataset(Dataset):
+    """
+    Dataset of (hidden_state, target_vector) pairs for router training.
+
+    The data file is a .pt dict with:
+        - "hidden_states": (N, 3072) float tensor
+        - "targets": (N, 32) float tensor in [0, 1]
+    """
+
+    def __init__(self, data_path: str | Path) -> None:
+        data = torch.load(data_path, weights_only=True)
+        self.hidden_states: torch.Tensor = data["hidden_states"].float()
+        self.targets: torch.Tensor = data["targets"].float()
+        assert self.hidden_states.size(0) == self.targets.size(0)
+
+    def __len__(self) -> int:
+        return self.hidden_states.size(0)
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.hidden_states[idx], self.targets[idx]
+
+    def split(
+        self, val_ratio: float = 0.1
+    ) -> tuple["RouterDataset", "RouterDataset"]:
+        """
+        Split into train/val subsets deterministically.
+
+        Returns Subset wrappers, not new RouterDataset instances,
+        to avoid data duplication.
+        """
+        n = len(self)
+        val_size = int(n * val_ratio)
+        train_size = n - val_size
+        indices = list(range(n))
+        train_indices = indices[:train_size]
+        val_indices = indices[train_size:]
+        return Subset(self, train_indices), Subset(self, val_indices)
+```
+
+- [ ] **Step 5: Write the training module**
 
 ```python
 # scripts/micro_kiki/train_router.py
@@ -1884,12 +1831,12 @@ def train_router(
     return final_path
 ```
 
-- [ ] **Step 7: Run all training tests**
+- [ ] **Step 6: Run all training tests**
 
 Run: `cd /Users/clems/KIKI-Mac_tunner && .venv/bin/python -m pytest tests/micro_kiki/test_router_dataset.py tests/micro_kiki/test_train_router.py -v`
 Expected: All 10 tests PASS
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 cd /Users/clems/KIKI-Mac_tunner
@@ -1899,7 +1846,451 @@ git commit -m "feat(micro-kiki): add router dataset, BCE+margin training loop, c
 
 ---
 
-### Task 5: Disk-Offloaded Stack Manager
+## Task 4: Inference Pipeline
+
+Build the full end-to-end inference pipeline that tokenizes a prompt, extracts hidden states, runs the router, loads active stacks, applies them, and generates a response.
+
+**Files:**
+- Create: `scripts/micro_kiki/inference.py`
+- Create: `tests/micro_kiki/test_inference.py`
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+# tests/micro_kiki/test_inference.py
+"""Tests for the full inference pipeline."""
+import pytest
+import time
+import torch
+import torch.nn as nn
+from pathlib import Path
+
+
+class MockTokenizer:
+    """Minimal tokenizer mock."""
+
+    def __init__(self):
+        self.eos_token_id = 2
+
+    def encode(self, text, return_tensors="pt"):
+        ids = torch.randint(100, 32000, (1, len(text.split()) + 5))
+        return ids
+
+    def decode(self, ids, skip_special_tokens=True):
+        return "Mock generated response."
+
+    def __call__(self, text, return_tensors="pt", **kwargs):
+        return {"input_ids": self.encode(text)}
+
+
+class MockBaseModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.linear = nn.Linear(10, 10)  # So it has parameters
+        self.config = type("Config", (), {
+            "num_hidden_layers": 40,
+            "hidden_size": 3072,
+        })()
+
+    def forward(self, input_ids, output_hidden_states=False, **kwargs):
+        batch_size, seq_len = input_ids.shape
+        hidden_states = None
+        if output_hidden_states:
+            hidden_states = tuple(
+                torch.randn(batch_size, seq_len, 3072) for _ in range(41)
+            )
+        return type("Output", (), {
+            "hidden_states": hidden_states,
+            "logits": torch.randn(batch_size, seq_len, 32000),
+        })()
+
+
+@pytest.fixture
+def router_weights(tmp_path):
+    from scripts.micro_kiki.meta_router import MetaRouter
+    router = MetaRouter(h_dim=3072, hidden_dim=512, num_domains=32)
+    path = tmp_path / "router.safetensors"
+    from safetensors.torch import save_file
+    state_dict = {k: v.contiguous() for k, v in router.state_dict().items()}
+    save_file(state_dict, path)
+    return path
+
+
+class TestInferencePipeline:
+    def test_route_returns_active_stacks(self, router_weights):
+        from scripts.micro_kiki.inference import InferencePipeline
+        from scripts.micro_kiki.meta_router import MetaRouter
+        from safetensors.torch import load_file
+
+        router = MetaRouter(h_dim=3072, hidden_dim=512, num_domains=32)
+        state_dict = load_file(str(router_weights))
+        router.load_state_dict(state_dict)
+
+        hidden = torch.randn(1, 3072)
+        pipeline = InferencePipeline.__new__(InferencePipeline)
+        pipeline.router = router
+        pipeline.gate_threshold = 0.12
+        pipeline.chat_floor = 0.20
+        pipeline.max_active = 4
+
+        active = pipeline.route(hidden)
+        # Should return list of (domain_idx, score) tuples
+        assert isinstance(active, list)
+        assert len(active) <= 4
+        for item in active:
+            assert len(item) == 2
+            domain_idx, score = item
+            assert 0 <= domain_idx < 32
+            assert score >= 0.12 or domain_idx == 0
+
+    def test_chat_floor_always_active(self, router_weights):
+        from scripts.micro_kiki.inference import InferencePipeline
+        from scripts.micro_kiki.meta_router import MetaRouter
+        from safetensors.torch import load_file
+
+        router = MetaRouter(h_dim=3072, hidden_dim=512, num_domains=32)
+        state_dict = load_file(str(router_weights))
+        router.load_state_dict(state_dict)
+
+        pipeline = InferencePipeline.__new__(InferencePipeline)
+        pipeline.router = router
+        pipeline.gate_threshold = 0.12
+        pipeline.chat_floor = 0.20
+        pipeline.max_active = 4
+
+        # Run many times -- chat-fr (idx 0) should always appear
+        chat_present_count = 0
+        for _ in range(20):
+            hidden = torch.randn(1, 3072)
+            active = pipeline.route(hidden)
+            domain_indices = [idx for idx, _ in active]
+            if 0 in domain_indices:
+                chat_present_count += 1
+        # Chat floor 0.20 > gate 0.12, so should always be present
+        assert chat_present_count == 20
+
+
+class TestRouterLatency:
+    def test_routing_under_10ms(self, router_weights):
+        """Router inference must complete in < 10ms per the spec."""
+        from scripts.micro_kiki.meta_router import MetaRouter
+        from safetensors.torch import load_file
+
+        router = MetaRouter(h_dim=3072, hidden_dim=512, num_domains=32)
+        state_dict = load_file(str(router_weights))
+        router.load_state_dict(state_dict)
+        router.eval()
+
+        hidden = torch.randn(1, 3072)
+
+        # Warmup
+        with torch.no_grad():
+            for _ in range(10):
+                router(hidden)
+
+        # Measure
+        times = []
+        with torch.no_grad():
+            for _ in range(100):
+                start = time.perf_counter()
+                router(hidden)
+                elapsed_ms = (time.perf_counter() - start) * 1000
+                times.append(elapsed_ms)
+
+        median_ms = sorted(times)[len(times) // 2]
+        assert median_ms < 10.0, f"Router latency {median_ms:.2f}ms exceeds 10ms target"
+
+
+class TestMaxActiveStacksEnforced:
+    def test_never_more_than_4_stacks(self, router_weights):
+        from scripts.micro_kiki.meta_router import MetaRouter
+        from safetensors.torch import load_file
+
+        router = MetaRouter(h_dim=3072, hidden_dim=512, num_domains=32)
+        state_dict = load_file(str(router_weights))
+        router.load_state_dict(state_dict)
+        router.eval()
+
+        for _ in range(50):
+            hidden = torch.randn(1, 3072)
+            with torch.no_grad():
+                scores = router(hidden)
+            active = router.get_active_stacks(
+                scores, gate_threshold=0.12, chat_floor=0.20, max_active=4
+            )
+            for batch_active in active:
+                assert len(batch_active) <= 4
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `cd /Users/clems/KIKI-Mac_tunner && .venv/bin/python -m pytest tests/micro_kiki/test_inference.py -v`
+Expected: FAIL with `ModuleNotFoundError`
+
+- [ ] **Step 3: Write the inference pipeline**
+
+```python
+# scripts/micro_kiki/inference.py
+"""
+Full inference pipeline: router -> stack selection -> forward.
+
+Flow:
+1. Tokenize prompt
+2. Run base model forward to extract hidden states
+3. Blend mid + last hidden states
+4. Router predicts 32 sigmoid scores
+5. Apply gating rules (threshold, chat floor, max 4)
+6. Load active stacks from disk (LRU cache)
+7. Apply stacks to base model
+8. Generate response
+
+The router adds < 10ms overhead. Stack swapping takes < 2s from SSD.
+"""
+from __future__ import annotations
+
+import logging
+import time
+from pathlib import Path
+
+import torch
+import torch.nn as nn
+from safetensors.torch import load_file
+
+from scripts.micro_kiki.constants import (
+    CHAT_FLOOR,
+    DOMAIN_NAMES,
+    GATE_THRESHOLD,
+    H_DIM,
+    MAX_ACTIVE_STACKS,
+    NUM_DOMAINS,
+    ROUTER_HIDDEN_DIM,
+)
+from scripts.micro_kiki.hidden_extractor import extract_blended_hidden
+from scripts.micro_kiki.meta_router import MetaRouter
+from scripts.micro_kiki.stack_manager import StackManager
+
+logger = logging.getLogger(__name__)
+
+
+class InferencePipeline:
+    """
+    End-to-end inference with meta-router and dynamic stack loading.
+
+    Usage:
+        pipeline = InferencePipeline.from_paths(
+            base_model=model,
+            tokenizer=tokenizer,
+            router_path="output/micro-kiki/router/router.safetensors",
+            stacks_dir="output/micro-kiki/stacks",
+        )
+        response = pipeline.generate("Explique le fonctionnement d'un MOSFET")
+    """
+
+    def __init__(
+        self,
+        base_model: nn.Module,
+        tokenizer,
+        router: MetaRouter,
+        stack_manager: StackManager,
+        apply_stacks_fn=None,
+        remove_stacks_fn=None,
+        gate_threshold: float = GATE_THRESHOLD,
+        chat_floor: float = CHAT_FLOOR,
+        max_active: int = MAX_ACTIVE_STACKS,
+        device: str = "cpu",
+    ) -> None:
+        self.base_model = base_model
+        self.tokenizer = tokenizer
+        self.router = router
+        self.stack_manager = stack_manager
+        self.apply_stacks_fn = apply_stacks_fn
+        self.remove_stacks_fn = remove_stacks_fn
+        self.gate_threshold = gate_threshold
+        self.chat_floor = chat_floor
+        self.max_active = max_active
+        self.device = device
+
+    @classmethod
+    def from_paths(
+        cls,
+        base_model: nn.Module,
+        tokenizer,
+        router_path: str | Path,
+        stacks_dir: str | Path,
+        apply_stacks_fn=None,
+        remove_stacks_fn=None,
+        gate_threshold: float = GATE_THRESHOLD,
+        chat_floor: float = CHAT_FLOOR,
+        max_active: int = MAX_ACTIVE_STACKS,
+        cache_size: int = 6,
+        device: str = "cpu",
+    ) -> "InferencePipeline":
+        """
+        Create pipeline from file paths.
+
+        Args:
+            base_model: Frozen Qwen3.5-4B model.
+            tokenizer: HF tokenizer for the base model.
+            router_path: Path to router.safetensors.
+            stacks_dir: Directory containing stack subdirectories.
+            apply_stacks_fn: Callable(model, weights_dict) to apply stack adapters.
+            remove_stacks_fn: Callable(model) to remove applied adapters.
+            gate_threshold: Minimum score to activate a stack.
+            chat_floor: Minimum score for chat-fr domain.
+            max_active: Maximum simultaneous active stacks.
+            cache_size: LRU cache size for stack manager.
+            device: Torch device.
+
+        Returns:
+            Configured InferencePipeline.
+        """
+        # Load router
+        router = MetaRouter(
+            h_dim=H_DIM,
+            hidden_dim=ROUTER_HIDDEN_DIM,
+            num_domains=NUM_DOMAINS,
+        )
+        state_dict = load_file(str(router_path))
+        router.load_state_dict(state_dict)
+        router.eval()
+        router.to(device)
+
+        # Initialize stack manager
+        stack_mgr = StackManager(stacks_dir, cache_size=cache_size, device=device)
+
+        return cls(
+            base_model=base_model,
+            tokenizer=tokenizer,
+            router=router,
+            stack_manager=stack_mgr,
+            apply_stacks_fn=apply_stacks_fn,
+            remove_stacks_fn=remove_stacks_fn,
+            gate_threshold=gate_threshold,
+            chat_floor=chat_floor,
+            max_active=max_active,
+            device=device,
+        )
+
+    def route(self, hidden: torch.Tensor) -> list[tuple[int, float]]:
+        """
+        Run the router on a blended hidden state and return active stacks.
+
+        Args:
+            hidden: (1, h_dim) blended hidden state vector.
+
+        Returns:
+            List of (domain_idx, score) tuples, sorted by score descending.
+            At most max_active entries. Chat-fr guaranteed if above gate.
+        """
+        self.router.eval()
+        with torch.no_grad():
+            scores = self.router(hidden)  # (1, 32)
+        active_list = self.router.get_active_stacks(
+            scores,
+            gate_threshold=self.gate_threshold,
+            chat_floor=self.chat_floor,
+            max_active=self.max_active,
+        )
+        return active_list[0]  # Single sample
+
+    def generate(
+        self,
+        prompt: str,
+        max_new_tokens: int = 512,
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+    ) -> dict:
+        """
+        Full generation pipeline.
+
+        Args:
+            prompt: Input text.
+            max_new_tokens: Maximum tokens to generate.
+            temperature: Sampling temperature.
+            top_p: Nucleus sampling threshold.
+
+        Returns:
+            Dict with keys:
+                - "response": Generated text.
+                - "active_stacks": List of (domain_name, score).
+                - "routing_time_ms": Router inference time.
+                - "total_time_ms": Total generation time.
+        """
+        total_start = time.perf_counter()
+
+        # Tokenize
+        inputs = self.tokenizer(prompt, return_tensors="pt")
+        input_ids = inputs["input_ids"].to(self.device)
+
+        # Extract hidden states for routing
+        hidden = extract_blended_hidden(self.base_model, input_ids)
+
+        # Route
+        route_start = time.perf_counter()
+        active = self.route(hidden.to(self.device))
+        routing_time_ms = (time.perf_counter() - route_start) * 1000
+
+        # Load active stacks
+        active_names = [
+            (DOMAIN_NAMES[idx], score) for idx, score in active
+        ]
+        logger.info(
+            "Active stacks: %s (routing: %.1fms)",
+            [(n, f"{s:.2f}") for n, s in active_names],
+            routing_time_ms,
+        )
+
+        # Apply stacks to model
+        if self.apply_stacks_fn is not None:
+            stack_weights = self.stack_manager.load_active_stacks(active)
+            self.apply_stacks_fn(self.base_model, stack_weights)
+
+        # Generate
+        with torch.no_grad():
+            outputs = self.base_model.generate(
+                input_ids,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                do_sample=temperature > 0,
+            )
+
+        # Remove stacks after generation
+        if self.remove_stacks_fn is not None:
+            self.remove_stacks_fn(self.base_model)
+
+        # Decode
+        generated_ids = outputs[0][input_ids.shape[1]:]
+        response = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+
+        total_time_ms = (time.perf_counter() - total_start) * 1000
+
+        return {
+            "response": response,
+            "active_stacks": active_names,
+            "routing_time_ms": routing_time_ms,
+            "total_time_ms": total_time_ms,
+        }
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `cd /Users/clems/KIKI-Mac_tunner && .venv/bin/python -m pytest tests/micro_kiki/test_inference.py -v`
+Expected: All 4 tests PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+cd /Users/clems/KIKI-Mac_tunner
+git add scripts/micro_kiki/inference.py tests/micro_kiki/test_inference.py
+git commit -m "feat(micro-kiki): add full inference pipeline with router + stack application"
+```
+
+---
+
+## Task 5: Disk-Offloaded Stack Manager
+
+Build the LRU-cached stack manager that loads adapter weights from disk on demand and evicts the least-recently-used stack when the cache is full. This keeps VRAM bounded to at most 4 stacks simultaneously.
 
 **Files:**
 - Create: `scripts/micro_kiki/stack_manager.py`
@@ -2048,11 +2439,11 @@ cache is full. This keeps VRAM usage bounded to max_active_stacks at a time.
 
 Directory structure:
     output/micro-kiki/stacks/
-    ├── chat-fr/
-    │   └── adapter.pt (or adapter.safetensors)
-    ├── reasoning/
-    │   └── adapter.pt
-    └── ...
+    +-- chat-fr/
+    |   +-- adapter.pt (or adapter.safetensors)
+    +-- reasoning/
+    |   +-- adapter.pt
+    +-- ...
 """
 from __future__ import annotations
 
@@ -2227,472 +2618,11 @@ git commit -m "feat(micro-kiki): add LRU-cached disk-offloaded stack manager"
 
 ---
 
-### Task 6: Full Inference Pipeline
+## Task 6: Validation Suite
+
+Build a comprehensive validation script that checks all spec criteria: parameter count < 2M, latency < 10ms, output range [0,1], max 4 active stacks, chat-fr floor, and routing accuracy on labeled data.
 
 **Files:**
-- Create: `scripts/micro_kiki/inference.py`
-- Create: `tests/micro_kiki/test_inference.py`
-
-- [ ] **Step 1: Write the failing tests**
-
-```python
-# tests/micro_kiki/test_inference.py
-"""Tests for the full inference pipeline."""
-import pytest
-import time
-import torch
-import torch.nn as nn
-from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-
-class MockTokenizer:
-    """Minimal tokenizer mock."""
-
-    def __init__(self):
-        self.eos_token_id = 2
-
-    def encode(self, text, return_tensors="pt"):
-        # Return random token IDs
-        ids = torch.randint(100, 32000, (1, len(text.split()) + 5))
-        return ids
-
-    def decode(self, ids, skip_special_tokens=True):
-        return "Mock generated response."
-
-    def __call__(self, text, return_tensors="pt", **kwargs):
-        return {"input_ids": self.encode(text)}
-
-
-class MockBaseModel(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.linear = nn.Linear(10, 10)  # So it has parameters
-        self.config = type("Config", (), {
-            "num_hidden_layers": 40,
-            "hidden_size": 3072,
-        })()
-
-    def forward(self, input_ids, output_hidden_states=False, **kwargs):
-        batch_size, seq_len = input_ids.shape
-        hidden_states = None
-        if output_hidden_states:
-            hidden_states = tuple(
-                torch.randn(batch_size, seq_len, 3072) for _ in range(41)
-            )
-        return type("Output", (), {
-            "hidden_states": hidden_states,
-            "logits": torch.randn(batch_size, seq_len, 32000),
-        })()
-
-
-@pytest.fixture
-def mock_stacks_dir(tmp_path):
-    stacks_dir = tmp_path / "stacks"
-    stacks_dir.mkdir()
-    domain_names = [
-        "chat-fr", "reasoning", "python", "typescript", "cpp",
-        "rust", "html-css", "shell", "sql", "yaml-json",
-        "docker", "kicad-dsl", "spice", "lua-upy", "embedded",
-        "stm32", "iot", "freecad", "platformio", "power",
-        "emc", "dsp", "spice-sim", "electronics", "kicad-pcb",
-        "web-frontend", "web-backend", "music-audio", "devops", "llm-orch",
-        "math", "security",
-    ]
-    for name in domain_names:
-        d = stacks_dir / name
-        d.mkdir()
-        torch.save({"lora_a": torch.randn(16, 3072)}, d / "adapter.pt")
-    return stacks_dir
-
-
-@pytest.fixture
-def router_weights(tmp_path):
-    from scripts.micro_kiki.meta_router import MetaRouter
-    router = MetaRouter(h_dim=3072, hidden_dim=512, num_domains=32)
-    path = tmp_path / "router.safetensors"
-    from safetensors.torch import save_file
-    state_dict = {k: v.contiguous() for k, v in router.state_dict().items()}
-    save_file(state_dict, path)
-    return path
-
-
-class TestInferencePipeline:
-    def test_route_returns_active_stacks(self, router_weights):
-        from scripts.micro_kiki.inference import InferencePipeline
-        from scripts.micro_kiki.meta_router import MetaRouter
-        from safetensors.torch import load_file
-
-        router = MetaRouter(h_dim=3072, hidden_dim=512, num_domains=32)
-        state_dict = load_file(str(router_weights))
-        router.load_state_dict(state_dict)
-
-        hidden = torch.randn(1, 3072)
-        pipeline = InferencePipeline.__new__(InferencePipeline)
-        pipeline.router = router
-        pipeline.gate_threshold = 0.12
-        pipeline.chat_floor = 0.20
-        pipeline.max_active = 4
-
-        active = pipeline.route(hidden)
-        # Should return list of (domain_idx, score) tuples
-        assert isinstance(active, list)
-        assert len(active) <= 4
-        for item in active:
-            assert len(item) == 2
-            domain_idx, score = item
-            assert 0 <= domain_idx < 32
-            assert score >= 0.12 or domain_idx == 0
-
-    def test_chat_floor_always_active(self, router_weights):
-        from scripts.micro_kiki.inference import InferencePipeline
-        from scripts.micro_kiki.meta_router import MetaRouter
-        from safetensors.torch import load_file
-
-        router = MetaRouter(h_dim=3072, hidden_dim=512, num_domains=32)
-        state_dict = load_file(str(router_weights))
-        router.load_state_dict(state_dict)
-
-        pipeline = InferencePipeline.__new__(InferencePipeline)
-        pipeline.router = router
-        pipeline.gate_threshold = 0.12
-        pipeline.chat_floor = 0.20
-        pipeline.max_active = 4
-
-        # Run many times -- chat-fr (idx 0) should always appear
-        chat_present_count = 0
-        for _ in range(20):
-            hidden = torch.randn(1, 3072)
-            active = pipeline.route(hidden)
-            domain_indices = [idx for idx, _ in active]
-            if 0 in domain_indices:
-                chat_present_count += 1
-        # Chat floor 0.20 > gate 0.12, so should always be present
-        assert chat_present_count == 20
-
-
-class TestRouterLatency:
-    def test_routing_under_10ms(self, router_weights):
-        """Router inference must complete in < 10ms per the spec."""
-        from scripts.micro_kiki.meta_router import MetaRouter
-        from safetensors.torch import load_file
-
-        router = MetaRouter(h_dim=3072, hidden_dim=512, num_domains=32)
-        state_dict = load_file(str(router_weights))
-        router.load_state_dict(state_dict)
-        router.eval()
-
-        hidden = torch.randn(1, 3072)
-
-        # Warmup
-        with torch.no_grad():
-            for _ in range(10):
-                router(hidden)
-
-        # Measure
-        times = []
-        with torch.no_grad():
-            for _ in range(100):
-                start = time.perf_counter()
-                router(hidden)
-                elapsed_ms = (time.perf_counter() - start) * 1000
-                times.append(elapsed_ms)
-
-        median_ms = sorted(times)[len(times) // 2]
-        assert median_ms < 10.0, f"Router latency {median_ms:.2f}ms exceeds 10ms target"
-
-
-class TestMaxActiveStacksEnforced:
-    def test_never_more_than_4_stacks(self, router_weights):
-        from scripts.micro_kiki.meta_router import MetaRouter
-        from safetensors.torch import load_file
-
-        router = MetaRouter(h_dim=3072, hidden_dim=512, num_domains=32)
-        state_dict = load_file(str(router_weights))
-        router.load_state_dict(state_dict)
-        router.eval()
-
-        for _ in range(50):
-            hidden = torch.randn(1, 3072)
-            with torch.no_grad():
-                scores = router(hidden)
-            active = router.get_active_stacks(
-                scores, gate_threshold=0.12, chat_floor=0.20, max_active=4
-            )
-            for batch_active in active:
-                assert len(batch_active) <= 4
-```
-
-- [ ] **Step 2: Run tests to verify they fail**
-
-Run: `cd /Users/clems/KIKI-Mac_tunner && .venv/bin/python -m pytest tests/micro_kiki/test_inference.py -v`
-Expected: FAIL with `ModuleNotFoundError`
-
-- [ ] **Step 3: Write the inference pipeline**
-
-```python
-# scripts/micro_kiki/inference.py
-"""
-Full inference pipeline: router -> stack selection -> forward.
-
-Flow:
-1. Tokenize prompt
-2. Run base model forward to extract hidden states
-3. Blend mid + last hidden states
-4. Router predicts 32 sigmoid scores
-5. Apply gating rules (threshold, chat floor, max 4)
-6. Load active stacks from disk (LRU cache)
-7. Apply stacks to base model
-8. Generate response
-
-The router adds < 10ms overhead. Stack swapping takes < 2s from SSD.
-"""
-from __future__ import annotations
-
-import logging
-import time
-from pathlib import Path
-
-import torch
-import torch.nn as nn
-from safetensors.torch import load_file
-
-from scripts.micro_kiki.constants import (
-    CHAT_FLOOR,
-    GATE_THRESHOLD,
-    H_DIM,
-    MAX_ACTIVE_STACKS,
-    NUM_DOMAINS,
-    ROUTER_HIDDEN_DIM,
-)
-from scripts.micro_kiki.hidden_extractor import extract_blended_hidden
-from scripts.micro_kiki.meta_router import MetaRouter
-from scripts.micro_kiki.stack_manager import StackManager
-
-logger = logging.getLogger(__name__)
-
-
-class InferencePipeline:
-    """
-    End-to-end inference with meta-router and dynamic stack loading.
-
-    Usage:
-        pipeline = InferencePipeline.from_paths(
-            base_model=model,
-            tokenizer=tokenizer,
-            router_path="output/micro-kiki/router/router.safetensors",
-            stacks_dir="output/micro-kiki/stacks",
-        )
-        response = pipeline.generate("Explique le fonctionnement d'un MOSFET")
-    """
-
-    def __init__(
-        self,
-        base_model: nn.Module,
-        tokenizer,
-        router: MetaRouter,
-        stack_manager: StackManager,
-        apply_stacks_fn=None,
-        remove_stacks_fn=None,
-        gate_threshold: float = GATE_THRESHOLD,
-        chat_floor: float = CHAT_FLOOR,
-        max_active: int = MAX_ACTIVE_STACKS,
-        device: str = "cpu",
-    ) -> None:
-        self.base_model = base_model
-        self.tokenizer = tokenizer
-        self.router = router
-        self.stack_manager = stack_manager
-        self.apply_stacks_fn = apply_stacks_fn
-        self.remove_stacks_fn = remove_stacks_fn
-        self.gate_threshold = gate_threshold
-        self.chat_floor = chat_floor
-        self.max_active = max_active
-        self.device = device
-
-    @classmethod
-    def from_paths(
-        cls,
-        base_model: nn.Module,
-        tokenizer,
-        router_path: str | Path,
-        stacks_dir: str | Path,
-        apply_stacks_fn=None,
-        remove_stacks_fn=None,
-        gate_threshold: float = GATE_THRESHOLD,
-        chat_floor: float = CHAT_FLOOR,
-        max_active: int = MAX_ACTIVE_STACKS,
-        cache_size: int = 6,
-        device: str = "cpu",
-    ) -> "InferencePipeline":
-        """
-        Create pipeline from file paths.
-
-        Args:
-            base_model: Frozen Qwen3.5-4B model.
-            tokenizer: HF tokenizer for the base model.
-            router_path: Path to router.safetensors.
-            stacks_dir: Directory containing stack subdirectories.
-            apply_stacks_fn: Callable(model, weights_dict) to apply stack adapters.
-            remove_stacks_fn: Callable(model) to remove applied adapters.
-            gate_threshold: Minimum score to activate a stack.
-            chat_floor: Minimum score for chat-fr domain.
-            max_active: Maximum simultaneous active stacks.
-            cache_size: LRU cache size for stack manager.
-            device: Torch device.
-
-        Returns:
-            Configured InferencePipeline.
-        """
-        # Load router
-        router = MetaRouter(
-            h_dim=H_DIM,
-            hidden_dim=ROUTER_HIDDEN_DIM,
-            num_domains=NUM_DOMAINS,
-        )
-        state_dict = load_file(str(router_path))
-        router.load_state_dict(state_dict)
-        router.eval()
-        router.to(device)
-
-        # Initialize stack manager
-        stack_mgr = StackManager(stacks_dir, cache_size=cache_size, device=device)
-
-        return cls(
-            base_model=base_model,
-            tokenizer=tokenizer,
-            router=router,
-            stack_manager=stack_mgr,
-            apply_stacks_fn=apply_stacks_fn,
-            remove_stacks_fn=remove_stacks_fn,
-            gate_threshold=gate_threshold,
-            chat_floor=chat_floor,
-            max_active=max_active,
-            device=device,
-        )
-
-    def route(self, hidden: torch.Tensor) -> list[tuple[int, float]]:
-        """
-        Run the router on a blended hidden state and return active stacks.
-
-        Args:
-            hidden: (1, h_dim) blended hidden state vector.
-
-        Returns:
-            List of (domain_idx, score) tuples, sorted by score descending.
-            At most max_active entries. Chat-fr guaranteed if above gate.
-        """
-        self.router.eval()
-        with torch.no_grad():
-            scores = self.router(hidden)  # (1, 32)
-        active_list = self.router.get_active_stacks(
-            scores,
-            gate_threshold=self.gate_threshold,
-            chat_floor=self.chat_floor,
-            max_active=self.max_active,
-        )
-        return active_list[0]  # Single sample
-
-    def generate(
-        self,
-        prompt: str,
-        max_new_tokens: int = 512,
-        temperature: float = 0.7,
-        top_p: float = 0.9,
-    ) -> dict:
-        """
-        Full generation pipeline.
-
-        Args:
-            prompt: Input text.
-            max_new_tokens: Maximum tokens to generate.
-            temperature: Sampling temperature.
-            top_p: Nucleus sampling threshold.
-
-        Returns:
-            Dict with keys:
-                - "response": Generated text.
-                - "active_stacks": List of (domain_name, score).
-                - "routing_time_ms": Router inference time.
-                - "total_time_ms": Total generation time.
-        """
-        total_start = time.perf_counter()
-
-        # Tokenize
-        inputs = self.tokenizer(prompt, return_tensors="pt")
-        input_ids = inputs["input_ids"].to(self.device)
-
-        # Extract hidden states for routing
-        hidden = extract_blended_hidden(self.base_model, input_ids)
-
-        # Route
-        route_start = time.perf_counter()
-        active = self.route(hidden.to(self.device))
-        routing_time_ms = (time.perf_counter() - route_start) * 1000
-
-        # Load active stacks
-        from scripts.micro_kiki.constants import DOMAIN_NAMES
-        active_names = [
-            (DOMAIN_NAMES[idx], score) for idx, score in active
-        ]
-        logger.info(
-            "Active stacks: %s (routing: %.1fms)",
-            [(n, f"{s:.2f}") for n, s in active_names],
-            routing_time_ms,
-        )
-
-        # Apply stacks to model
-        if self.apply_stacks_fn is not None:
-            stack_weights = self.stack_manager.load_active_stacks(active)
-            self.apply_stacks_fn(self.base_model, stack_weights)
-
-        # Generate
-        with torch.no_grad():
-            outputs = self.base_model.generate(
-                input_ids,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                do_sample=temperature > 0,
-            )
-
-        # Remove stacks after generation
-        if self.remove_stacks_fn is not None:
-            self.remove_stacks_fn(self.base_model)
-
-        # Decode
-        generated_ids = outputs[0][input_ids.shape[1]:]
-        response = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
-
-        total_time_ms = (time.perf_counter() - total_start) * 1000
-
-        return {
-            "response": response,
-            "active_stacks": active_names,
-            "routing_time_ms": routing_time_ms,
-            "total_time_ms": total_time_ms,
-        }
-```
-
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `cd /Users/clems/KIKI-Mac_tunner && .venv/bin/python -m pytest tests/micro_kiki/test_inference.py -v`
-Expected: All 4 tests PASS
-
-- [ ] **Step 5: Commit**
-
-```bash
-cd /Users/clems/KIKI-Mac_tunner
-git add scripts/micro_kiki/inference.py tests/micro_kiki/test_inference.py
-git commit -m "feat(micro-kiki): add full inference pipeline with router + LRU stack loading"
-```
-
----
-
-### Task 7: Validation Suite
-
-**Files:**
-- Modify: `tests/micro_kiki/test_inference.py` (latency tests already there)
 - Create: `scripts/micro_kiki/validate.py`
 
 - [ ] **Step 1: Write the validation script**
@@ -2712,7 +2642,6 @@ Checks:
 """
 from __future__ import annotations
 
-import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -2724,7 +2653,6 @@ from safetensors.torch import load_file
 from scripts.micro_kiki.constants import (
     CHAT_FLOOR,
     DOMAIN_NAMES,
-    DOMAIN_TO_INDEX,
     GATE_THRESHOLD,
     H_DIM,
     MAX_ACTIVE_STACKS,
@@ -3017,10 +2945,10 @@ git commit -m "feat(micro-kiki): add validation suite (param count, latency, rou
 Run: `cd /Users/clems/KIKI-Mac_tunner && .venv/bin/python -m pytest tests/micro_kiki/ -v --tb=short 2>&1 | tail -30`
 Expected: All tests PASS, 0 failures
 
-- [ ] **Step 5: Final commit with all files**
+- [ ] **Step 5: Final commit with plan**
 
 ```bash
 cd /Users/clems/KIKI-Mac_tunner
-git add -A scripts/micro_kiki/ tests/micro_kiki/ configs/micro-kiki-router.yaml docs/plans/2026-04-15-micro-kiki-plan3-meta-router.md
-git commit -m "docs(micro-kiki): add Plan 3 meta-router implementation plan"
+git add docs/plans/2026-04-15-micro-kiki-plan3-meta-router.md
+git commit -m "docs(micro-kiki): rewrite Plan 3 meta-router with 6-task structure"
 ```
