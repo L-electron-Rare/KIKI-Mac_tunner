@@ -1,0 +1,26 @@
+# Qwen3.5-122B-A10B-Opus-v3 — Fallback seq 896
+# MoE 122B total (10B actifs), fine-tune Opus reasoning
+# Reduced max_seq_length (896) + doubled grad_accumulation (16)
+model: models/Qwen3.5-122B-A10B-BF16
+data: data/final-opus-v3-1
+train: true
+fine_tune_type: lora
+optimizer: adamw
+num_layers: -1
+lora_parameters:
+  rank: 64
+  scale: 64.0
+  dropout: 0.01
+batch_size: 1
+iters: 3000
+val_batches: 5
+learning_rate: 8e-6
+steps_per_report: 5
+steps_per_eval: 50
+save_every: 50
+grad_accumulation_steps: 16
+max_seq_length: 896
+grad_checkpoint: true
+clear_cache_threshold: 2
+adapter_path: output/qwen35-122b-opus-v3-seq896
+seed: 42
