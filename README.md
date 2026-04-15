@@ -56,15 +56,30 @@ Peak memory for 122B training: 383 GB.
 | final-opus-v3-1 | 11,880 train + 626 valid |
 | Distilled (123B + 35B + vlm) | ~2,237 |
 
-## ANE Research Highlights
+## World Firsts
 
-World-first DeltaNet to CoreML ANE conversion:
-- Gated DeltaNet layers converted to Conv2d for ANE dispatch
-- 474 tok/s per layer on Apple Neural Engine
-- Full 40-layer stack: 14.4 tok/s pure ANE
-- Verdict: MLX native wins on M3 Ultra (45-89 tok/s via mlx-vlm), ANE useful only when GPU is busy (e.g. during training)
+### 1. DeltaNet → CoreML/ANE Conversion
+First-ever conversion of Gated DeltaNet (linear attention with recurrent state) to CoreML for Apple Neural Engine. No prior work existed — ANEMLL only supports standard transformer attention.
 
-See [`research/ane-hybrid/`](research/ane-hybrid/) for details.
+- Chunkwise parallel form expressed as CoreML MIL ops (matmul, cumsum, exp)
+- `ct.StateType` for recurrent state persistence between decode steps
+- **474 tok/s per layer**, 14.4 tok/s for full 40-layer stack on ANE
+- Real Qwen3.5 weights loaded and verified
+
+### 2. 122B MoE BF16 Training on Single Apple Silicon Machine
+First documented fine-tuning of a 122B MoE model in BF16 on a single Mac. Previous record: dense 20B on 512 GB.
+
+- Qwen3.5-122B-A10B (10B active params) at 383 GB peak memory
+- Required custom MLX fork with 3x Metal buffer limit (499K → 1.5M)
+- Val loss 0.497, train loss 0.177 at iter 270
+
+### 3. First Qwen3.5-122B-A10B Opus-Distilled Model
+No 122B Opus-distilled model exists on HuggingFace. Jackrong published 9B, 27B, and 35B variants — we created the first 122B.
+
+- Distilled from Claude Opus 4.6 reasoning traces (11,880 examples)
+- 5-phase training pipeline: SFT curriculum → SimPO → GRPO → merge → GGUF
+
+See [`research/ane-hybrid/`](research/ane-hybrid/) for ANE research details.
 
 ## Models
 
