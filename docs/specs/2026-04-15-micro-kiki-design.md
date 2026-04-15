@@ -55,10 +55,14 @@ Fleet de 32 domaines spécialisés sur base Qwen3.5-4B, assemblés via Brainstac
 |-----------|------|
 | Base Qwen3.5-4B Q4 | 2.5 Go |
 | Meta-routeur | 0.01 Go |
-| 2-4 stacks actifs | 0.6-1.2 Go |
+| 2-4 stacks actifs (250 Mo chacun) | 0.5-1.0 Go |
 | KV cache (4K ctx) | ~0.5 Go |
 | **Total** | **~4-5 Go** |
 | **Marge** | **19 Go** |
+| **Throughput estimé** | **~65 tok/s** (Q4 + LoRA, pas 128) |
+
+**Note** : vLLM avec LoRA actifs = ~50% de perte vs base model.
+Alternative : runtime merge des stacks (CoMoL) élimine le overhead.
 
 ## Base model : Qwen3.5-4B
 
@@ -85,14 +89,39 @@ Qwen3.5-4B gagne sur tous les critères sauf HumanEval brut (Gemma 4 E4B a 85%+)
 |-------|----------------|---------------------|
 | Base model | Gemma 3 12B | Qwen3.5-4B |
 | `h_dim` | 3840 | 3072 (Qwen3.5-4B) |
-| `ns_top_k_dirs` | 64 | **32** |
-| Espace null utilisé | 8.3% | **33%** (32×32/3072) |
+| `ns_top_k_dirs` | 64 | **24** (conservateur, 25% espace) |
+| Espace null utilisé | 8.3% | **25%** (32×24/3072) |
 | MoE experts/stack | 4 | 4 |
 | LoRA rank | 16 | 16 |
+| LoRA targets | 7 projections | **12 projections** (voir ci-dessous) |
 | Residual boost rounds | 2-3 | 1-2 |
-| Stack size | 567 Mo (12B) | **~150 Mo** (4B) |
-| Total disque | 5.67 Go | **~4.8 Go** |
+| Stack size | 567 Mo (12B) | **~250 Mo** (4B, 12 targets) |
+| Total disque | 5.67 Go | **~8 Go** |
 | Meta-routeur sorties | 5 | **32** |
+
+### LoRA targets — CRITIQUE
+
+Qwen3.5 a une architecture hybride. Les projections LoRA diffèrent
+selon le type de couche :
+
+| Couche Full Attention (25%) | Couche GatedDeltaNet (75%) | MLP (toutes) |
+|----------------------------|---------------------------|-------------|
+| `q_proj` | `in_proj_qkv` | `gate_proj` |
+| `k_proj` | `in_proj_z` | `up_proj` |
+| `v_proj` | `in_proj_a` | `down_proj` |
+| `o_proj` | `in_proj_b` | |
+| | `out_proj` | |
+
+**12 targets au total** ou utiliser `target_modules: all-linear`.
+Ignorer les couches GatedDeltaNet = entraîner seulement 25% du modèle.
+
+### Validation : 2-stack POC obligatoire
+
+Avant de lancer les 32 stacks, valider sur 2 stacks (chat-fr + python) :
+- [ ] Null-space projection fonctionne avec GatedDeltaNet
+- [ ] MoE-LoRA sur les 12 targets converge
+- [ ] Forgetting < 0.03 après ajout du 2ème stack
+- [ ] Stack load/unload fonctionne (disk offload)
 
 ### Ordre curriculum (séquentiel, chaque domaine ne dégrade pas les précédents)
 
@@ -322,25 +351,33 @@ ANE : score réponse[i]     ──→ reward = 0.85 ──→
 
 Gain : **scoring gratuit** (0 impact sur la vitesse de génération GPU).
 
-### B. Speculative decoding via ANE
+### B. Speculative decoding via ANE ⚠️ RISQUE ÉLEVÉ
 
-Un draft model Qwen3.5-0.8B (0.5 Go) tourne sur ANE. Il propose N tokens,
-le GPU (4B + stacks) vérifie en un seul forward pass.
+**Statut avril 2026** : speculative decoding est CASSÉ sur Qwen3.5 GatedDeltaNet
+dans vLLM (#39273) et partiellement dans llama.cpp. Le SSM state n'a pas de
+rollback quand des tokens sont rejetés, corrompant la sortie.
+
+De plus, vLLM ne supporte PAS speculative decoding + LoRA simultanément.
+
+**Si le bug est corrigé**, un draft Qwen3.5-0.8B sur ANE proposerait N tokens :
 
 ```
 ANE (draft 0.8B) : propose tokens [t1, t2, t3, t4, t5]  → 200+ tok/s
-GPU (4B + stacks) : vérifie [t1✓, t2✓, t3✓, t4✗]       → 1 forward
-                    accepte 3 tokens au lieu de 1
+GPU (4B + stacks) : vérifie [t1✓, t2✓, t3✗]             → 1 forward
+                    accepte 2 tokens au lieu de 1
 ```
 
 | Métrique | Sans speculative | Avec speculative ANE |
 |----------|-----------------|---------------------|
 | tok/s GPU | ~30-50 | ~30-50 |
-| tok/s effectifs | ~30-50 | **~60-100** (2-3x) |
-| VRAM supplémentaire | 0 | 0 (ANE séparé) |
+| tok/s effectifs | ~30-50 | **~40-75** (1.3-1.5x réaliste) |
+| Acceptance rate | — | ~30-50% (LoRA mismatch) |
 
-Le draft 0.8B partage le même tokenizer que le 4B (même famille Qwen3.5).
-La conversion CoreML est prouvée (on a déjà converti le 9B DeltaNet).
+**Contingency** : MLX-only inference sans speculative decoding.
+Avec Q4 + MoE-LoRA, ~30-50 tok/s est atteignable sans la complexité.
+
+**Technique à surveiller** : OmniDraft (arxiv:2507.02659) — adapte le draft
+model au target via LoRA online, améliorant l'acceptance rate.
 
 ### C. ANE pour meta-routeur + embedding
 
@@ -377,7 +414,7 @@ Notre conversion DeltaNet → CoreML (Phase 1 ANE research) s'applique directeme
 
 | Scénario | GPU | ANE | CPU | Gain |
 |----------|-----|-----|-----|------|
-| Inférence standard | 4B + stacks | Draft 0.8B (spec) | Routeur | **2-3x tok/s** |
+| Inférence standard | 4B + stacks | Draft 0.8B (spec) | Routeur | **1.3-1.5x tok/s** (si bug fixé) |
 | Training GRPO | Génère K=4 | Score réponses | Routeur | **Scoring gratuit** |
 | Training SFT | Training LoRA | Idle | — | Pas de gain |
 | Batch scoring | Idle | Score dataset | — | **14 tok/s continu** |
@@ -386,16 +423,37 @@ Notre conversion DeltaNet → CoreML (Phase 1 ANE research) s'applique directeme
 
 | Métrique | Sans ANE | Avec ANE |
 |----------|----------|----------|
-| Inférence tok/s | 30-50 | **60-100** (speculative) |
+| Inférence tok/s | 30-50 | **40-75** (speculative, si bug fixé) |
 | GRPO scoring overhead | +50% temps | **~0%** (parallèle) |
 | Latence routeur | ~5 ms CPU | **~2 ms ANE** |
 | Consommation | ~20W GPU seul | ~22W (GPU+ANE) |
 
-## Risques
+## Timeline révisée
 
-| Risque | Mitigation |
-|--------|-----------|
-| 32 domaines saturent le null-space | Réduire ns_top_k_dirs à 32 (33% espace) |
-| Base 4B trop petite pour 32 spécialisations | Upgrade vers Qwen3.5-9B (5.5 Go Q4, tient RTX) |
-| Brainstacks pas testé avec Qwen3.5 | Port du code Gemma → Qwen (même API transformers) |
-| kxkm-ai inaccessible (Tailscale) | Training 100% sur Mac, deploy GGUF via NFS |
+| Phase | Contenu | Durée | Dépendance |
+|-------|---------|-------|-----------|
+| **0** | 2-stack POC (chat-fr + python) | 2 jours | — |
+| **1** | Data Pipeline (32 datasets) | 1 semaine | — |
+| **1.5** | Eval Suite Design (32 domaines) | 1 semaine | Phase 1 |
+| **2** | Brainstacks Training (32 stacks) | 3 jours | Phase 0 + 1 |
+| **3** | Meta-routeur (32 sigmoid) | 1 jour | Phase 2 |
+| **4** | ANE Pipeline (A+C, pas B) | 2 jours | Phase 3 |
+| **5** | Alignment (SimPO + GRPO) | 3 jours | Phase 3 |
+| **6** | Export + Deploy (RTX + Mac) | 2 jours | Phase 5 |
+| **7** | Post-training optimization | Continu | Phase 6 |
+
+Phase 7 : CoMoL runtime merging, NSC stack consolidation, DR-LoRA rank adaptatif.
+
+## Risques — Matrice révisée (passe 2)
+
+| Risque | Sévérité | Probabilité | Mitigation |
+|--------|---------|------------|-----------|
+| **LoRA targets incorrects (GatedDeltaNet)** | CRITIQUE | 100% si pas fixé | Cibler les 12 projections ou `all-linear` |
+| **Pas de code Brainstacks** | HIGH | 100% | Implémenter from scratch, 2-stack POC d'abord |
+| **Speculative decoding cassé sur GDN** | HIGH | ~90% | Contingency MLX-only, surveiller vLLM #39273 |
+| **50% throughput loss avec LoRA (vLLM)** | MEDIUM | ~80% | Runtime merge (CoMoL) ou SGLang |
+| **33% null-space = uncharted territory** | MEDIUM | ~40% | Réduit à 25% (ns_top_k_dirs=24) |
+| **Eval insuffisante (4h vs 1 semaine)** | MEDIUM | 100% si pas fixé | Phase 1.5 dédiée |
+| Stack size sous-estimé (150→250 Mo) | MEDIUM | 100% | Corrigé dans la spec |
+| 4B trop petit pour 32 spécialisations | LOW | ~20% | Upgrade Qwen3.5-9B |
+| kxkm-ai inaccessible | LOW | ~30% | Training 100% Mac, deploy NFS |
