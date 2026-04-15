@@ -35,6 +35,18 @@
 | DeltaNet 40 couches ANE | CoreML | 14.4 (474/couche) |
 | MLX pur (modele complet) | MLX | 14.2 |
 
+## Pipeline Sonnet-Devstral
+
+| Fichier | Rôle |
+|---------|------|
+| `configs/mlx-lm-devstral2-sonnet.yaml` | Config LoRA pour Devstral 2 123B coding |
+| `scripts/download_devstral.sh` | Téléchargement modèle + 7 datasets coding |
+| `scripts/prepare_coding_dataset.py` | Fusion, filtrage, dédup → 18K exemples |
+| `scripts/train_devstral_sonnet.py` | Training mlx-tune LoRA sur Devstral 2 dense |
+| `data/sonnet-coding/` | Dataset final (train.jsonl + valid.jsonl) |
+
+Datasets sources : OpenCodeReasoning (nvidia), OpenCodeInstruct (nvidia), Codeforces-CoTs (open-r1), Magicoder OSS-Instruct, CodeFeedback, OpenHands trajectoires, Nemotron-SWE.
+
 ## Infra cle
 
 - mlx-tune 0.4.21

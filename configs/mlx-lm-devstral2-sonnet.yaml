@@ -1,0 +1,26 @@
+# Devstral 2 123B — Pipeline Sonnet-style fast coding
+# Dense 123B, 72.2% SWE-bench, fine-tune pour coding rapide avec traces de raisonnement
+# Architecture dense (pas MoE) — plus simple que le 122B Qwen, mais ~250 Go BF16
+model: models/Devstral-2-123B-Instruct
+data: data/sonnet-coding
+train: true
+fine_tune_type: lora
+optimizer: adamw
+num_layers: -1
+lora_parameters:
+  rank: 64
+  scale: 128.0
+  dropout: 0.01
+batch_size: 1
+iters: 2000
+val_batches: 5
+learning_rate: 8e-6
+steps_per_report: 5
+steps_per_eval: 50
+save_every: 50
+grad_accumulation_steps: 8
+max_seq_length: 4096
+grad_checkpoint: true
+clear_cache_threshold: 2
+adapter_path: output/devstral2-sonnet
+seed: 42

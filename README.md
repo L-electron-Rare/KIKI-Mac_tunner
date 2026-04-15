@@ -79,6 +79,19 @@ No 122B Opus-distilled model exists on HuggingFace. Jackrong published 9B, 27B, 
 - Distilled from Claude Opus 4.6 reasoning traces (11,880 examples)
 - 5-phase training pipeline: SFT curriculum → SimPO → GRPO → merge → GGUF
 
+## Sonnet-Devstral Pipeline
+
+Fine-tune Devstral 2 123B (dense, 72.2% SWE-bench) pour du coding rapide style Sonnet. Dataset mixte ~18K exemples : traces de raisonnement R1, instructions code, trajectoires agentic SWE. Langages cibles : Python, TypeScript, Rust, Go.
+
+```bash
+./scripts/download_devstral.sh datasets   # télécharger les datasets de coding
+python scripts/prepare_coding_dataset.py  # préparer 18K exemples filtrés
+./scripts/download_devstral.sh model      # télécharger Devstral 2 123B (~250 Go)
+python scripts/train_devstral_sonnet.py   # lancer le training LoRA
+```
+
+Config : `configs/mlx-lm-devstral2-sonnet.yaml` — LoRA rank 64, 4096 seq, 2000 iters.
+
 See [`research/ane-hybrid/`](research/ane-hybrid/) for ANE research details.
 
 ## Models
@@ -89,6 +102,7 @@ See [`research/ane-hybrid/`](research/ane-hybrid/) for ANE research details.
 | Qwen3.5-35B-A3B-Opus-bf16 | 65 GB | `models/` |
 | Qwen3.5-35B-A3B-Opus-vlm | — | fusion model (vision tower) |
 | Mistral Large 123B | ~250 GB | `models/` |
+| Devstral 2 123B (dense) | ~250 GB | `models/` (à télécharger) |
 
 ## Architecture
 
