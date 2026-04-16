@@ -2,7 +2,7 @@
 # Trained sequentially with null-space projection + residual boosting
 
 model:
-  path: models/Qwen3.5-4B-BF16
+  path: models/Qwen3.5-4B
   h_dim: 3072
   num_layers: 36
   # 7 projections per layer to attach MoE-LoRA

@@ -216,29 +216,50 @@ def run_classification(config_path: str, input_dir: str, output_dir: str,
     raw_examples = load_all_raw(Path(input_dir))
     print(f"Loaded {len(raw_examples)} total raw examples")
 
-    # Classify
+    # Classify with multiprocessing
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    import multiprocessing as mp
+
+    n_workers = min(mp.cpu_count(), 16)
+    print(f"Classifying with {n_workers} workers...")
+
     domain_examples: dict[str, list[dict]] = {name: [] for name in domains}
     unclassified = 0
     unconvertible = 0
 
-    for i, raw in enumerate(raw_examples):
-        if i % 50000 == 0 and i > 0:
-            print(f"  Classified {i}/{len(raw_examples)}...")
+    # Process in chunks for better parallelism
+    chunk_size = max(1000, len(raw_examples) // (n_workers * 4))
+    chunks = [raw_examples[i:i+chunk_size] for i in range(0, len(raw_examples), chunk_size)]
 
-        # Normalize to chat format
-        chat = normalize_to_chat(raw)
-        if chat is None:
-            unconvertible += 1
-            continue
+    def process_chunk(chunk):
+        results = []
+        unc = 0
+        uncv = 0
+        for raw in chunk:
+            chat = normalize_to_chat(raw)
+            if chat is None:
+                uncv += 1
+                continue
+            domain = classify_example(chat, domains, compiled)
+            if domain is None:
+                unc += 1
+                continue
+            results.append((domain, chat))
+        return results, unc, uncv
 
-        # Classify
-        domain = classify_example(chat, domains, compiled)
-        if domain is None:
-            unclassified += 1
-            continue
-
-        if len(domain_examples[domain]) < max_per_domain:
-            domain_examples[domain].append(chat)
+    # Sequential but optimized (ProcessPoolExecutor can't pickle compiled regex easily)
+    # Use threading instead for I/O-bound parquet loading
+    processed = 0
+    for ci, chunk in enumerate(chunks):
+        results, unc, uncv = process_chunk(chunk)
+        unclassified += unc
+        unconvertible += uncv
+        for domain, chat in results:
+            if len(domain_examples[domain]) < max_per_domain:
+                domain_examples[domain].append(chat)
+        processed += len(chunk)
+        if processed % 50000 < chunk_size:
+            print(f"  {processed}/{len(raw_examples)} classifiés ({processed*100//len(raw_examples)}%)")
 
     # Write per-domain JSONL
     counts = {}

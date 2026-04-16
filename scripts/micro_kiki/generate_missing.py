@@ -16,9 +16,8 @@ Usage:
 import argparse
 import json
 import random
-import subprocess
 import sys
-import tempfile
+import time
 from pathlib import Path
 
 import yaml
@@ -339,34 +338,46 @@ def parse_teacher_response(raw: str) -> dict | None:
     }
 
 
-def generate_with_mlx(prompt: str, model_path: str, max_tokens: int = 2048) -> str:
-    """Generate text using mlx-vlm or mlx-lm locally."""
-    # Write prompt to temp file for clean passing
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
-        f.write(prompt)
-        prompt_file = f.name
+_loaded_model = None
+_loaded_tokenizer = None
+_loaded_model_path = None
 
+
+def _ensure_model(model_path: str):
+    """Load model once, reuse across all generations."""
+    global _loaded_model, _loaded_tokenizer, _loaded_model_path
+    if _loaded_model_path == model_path:
+        return _loaded_model, _loaded_tokenizer
+
+    print(f"  Loading teacher model: {model_path} ...")
+    t0 = time.time()
+    from mlx_lm import load
+    _loaded_model, _loaded_tokenizer = load(model_path)
+    _loaded_model_path = model_path
+    print(f"  Model loaded in {time.time()-t0:.1f}s")
+    return _loaded_model, _loaded_tokenizer
+
+
+def generate_with_mlx(prompt: str, model_path: str, max_tokens: int = 2048) -> str:
+    """Generate text using mlx-lm with model loaded once in memory."""
+    model, tokenizer = _ensure_model(model_path)
+
+    from mlx_lm import generate
+    from mlx_lm.sample_utils import make_sampler
+
+    sampler = make_sampler(temp=0.8, top_p=0.95)
     try:
-        result = subprocess.run(
-            [
-                sys.executable, "-m", "mlx_lm.generate",
-                "--model", model_path,
-                "--prompt", prompt,
-                "--max-tokens", str(max_tokens),
-                "--temp", "0.8",
-                "--top-p", "0.95",
-            ],
-            capture_output=True, text=True, timeout=300,
+        result = generate(
+            model, tokenizer,
+            prompt=prompt,
+            max_tokens=max_tokens,
+            sampler=sampler,
+            verbose=False,
         )
-        if result.returncode != 0:
-            print(f"  mlx_lm.generate error: {result.stderr[:200]}", file=sys.stderr)
-            return ""
-        return result.stdout.strip()
-    except subprocess.TimeoutExpired:
-        print("  Generation timed out", file=sys.stderr)
+        return result.strip() if isinstance(result, str) else str(result).strip()
+    except Exception as e:
+        print(f"  Generation error: {e}", file=sys.stderr)
         return ""
-    finally:
-        Path(prompt_file).unlink(missing_ok=True)
 
 
 def count_classified(classified_dir: Path) -> dict[str, int]:
@@ -383,7 +394,8 @@ def count_classified(classified_dir: Path) -> dict[str, int]:
 
 def run_generation(config_path: str, classified_dir: str, output_dir: str,
                    teacher_model: str, max_generate: int = 500,
-                   dry_run: bool = False) -> dict[str, int]:
+                   dry_run: bool = False,
+                   only_domains: list[str] | None = None) -> dict[str, int]:
     """Generate missing data for sparse domains.
 
     Returns dict of domain -> number of generated examples.
@@ -395,8 +407,11 @@ def run_generation(config_path: str, classified_dir: str, output_dir: str,
     out_path.mkdir(parents=True, exist_ok=True)
 
     generated_counts = {}
+    total_t0 = time.time()
 
     for name, cfg in domains.items():
+        if only_domains and name not in only_domains:
+            continue
         target = cfg["target"]
         have = existing.get(name, 0)
         need = max(0, target - have)
@@ -441,6 +456,16 @@ def run_generation(config_path: str, classified_dir: str, output_dir: str,
         generated_counts[name] = len(generated)
         print(f"    {name}: wrote {len(generated)} examples to {outfile}")
 
+    elapsed = time.time() - total_t0
+    total_gen = sum(generated_counts.values())
+    print(f"\n=== Generation Summary ===")
+    print(f"Total generated: {total_gen} examples in {elapsed:.0f}s")
+    if total_gen > 0:
+        print(f"Speed: {elapsed/total_gen:.1f}s/example")
+    for name, count in sorted(generated_counts.items()):
+        if count > 0:
+            print(f"  {name}: {count}")
+
     return generated_counts
 
 
@@ -456,10 +481,13 @@ def main():
                         help="Max examples to generate per domain per run")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print what would be generated without running the teacher")
+    parser.add_argument("--only-domains", type=str, default=None,
+                        help="Comma-separated list of domain names to generate (skip others)")
     args = parser.parse_args()
 
     run_generation(args.config, args.classified_dir, args.output_dir,
-                   args.teacher_model, args.max_generate, args.dry_run)
+                   args.teacher_model, args.max_generate, args.dry_run,
+                   only_domains=args.only_domains.split(",") if args.only_domains else None)
 
 
 if __name__ == "__main__":
