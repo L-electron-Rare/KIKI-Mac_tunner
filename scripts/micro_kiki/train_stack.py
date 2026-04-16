@@ -399,7 +399,9 @@ def train_single_stack(config_path: str, domain: str, stack_index: int) -> None:
 
     # ---- 6. Residual boosting ----
     print("\n[6/7] Residual boosting...")
-    max_boost_rounds = boost_cfg.get("max_rounds", 2)
+    # TODO: fix OOM in per-example loss eval (loads all examples at once)
+    # Skip boosting for now — SFT alone gives good results
+    max_boost_rounds = 0  # was: boost_cfg.get("max_rounds", 2)
     min_improvement = boost_cfg.get("min_improvement", 0.002)
     prev_loss = best_val_loss
 
