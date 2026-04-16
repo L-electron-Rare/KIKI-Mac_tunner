@@ -7,6 +7,7 @@
 | Fix OOM training | 2026-04-12 | Fait |
 | ANE hybrid pipeline | 2026-04-14 | Phases 1-3 faites |
 | 122B Opus-v3 mlx-tune | 2026-04-15 | En cours |
+| Micro_KIKI 32 experts | 2026-04-16 | Plan 1 fait, Plan 2 en cours |
 
 ## Datasets disponibles
 
@@ -46,6 +47,19 @@
 | `data/sonnet-coding/` | Dataset final (train.jsonl + valid.jsonl) |
 
 Datasets sources : OpenCodeReasoning (nvidia), OpenCodeInstruct (nvidia), Codeforces-CoTs (open-r1), Magicoder OSS-Instruct, CodeFeedback, OpenHands trajectoires, Nemotron-SWE.
+
+## Micro_KIKI Pipeline
+
+32 experts MoE-LoRA sur Qwen3.5-4B via Brainstacks (null-space projection + residual boosting).
+
+| Etape | Fichiers | Statut |
+|-------|----------|--------|
+| Data pipeline | `scripts/micro_kiki/classify_parallel.py`, `deduplicate.py`, `split_domains.py` | Fait (63K exemples, 32 domaines) |
+| Brainstacks training | `scripts/micro_kiki/train_stack.py`, `eval_stack.py`, `train_all_stacks.sh` | En cours |
+| Config | `configs/micro_kiki/brainstacks.yaml`, `domains.yaml` | Fait |
+| Plans | `docs/plans/2026-04-15-micro-kiki-plan{1-4}*.md` | Plans 1-4 ecrits |
+
+Datasets : 1.57M raw → 63K dedup (25 sources : CodeFeedback, Glaive-v3, OASST2, French-Alpaca-110K, Trendyol-Cybersec, STM32-HAL, LTspice, etc.)
 
 ## Infra cle
 

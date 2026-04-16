@@ -79,6 +79,34 @@ No 122B Opus-distilled model exists on HuggingFace. Jackrong published 9B, 27B, 
 - Distilled from Claude Opus 4.6 reasoning traces (11,880 examples)
 - 5-phase training pipeline: SFT curriculum → SimPO → GRPO → merge → GGUF
 
+## Micro_KIKI — 32 Expert Fleet
+
+Fleet of 32 specialized MoE-LoRA experts on Qwen3.5-4B using [Brainstacks](https://arxiv.org/abs/2604.01152) (null-space projection for zero-forgetting continual learning). Deployable on RTX 4090 24 GB.
+
+**Domains:** 12 coding languages + 10 embedded/hardware + 10 general (reasoning, French, web, etc.)
+
+```bash
+# Data pipeline (1.57M raw → 63K deduplicated)
+bash scripts/micro_kiki/pipeline_data.sh
+
+# Train all 32 stacks sequentially (~500 steps each)
+bash scripts/micro_kiki/train_all_stacks.sh
+
+# Evaluate forgetting matrix
+uv run python scripts/micro_kiki/eval_stack.py --all
+```
+
+| Phase | Domains | Status |
+|-------|---------|--------|
+| 1. Foundations | chat-fr, reasoning | Data ready |
+| 2. Coding core | python, typescript, cpp, rust | Data ready |
+| 3. Coding secondary | html-css, shell, sql, yaml-json, docker, kicad-dsl, spice, lua-upy | Data ready |
+| 4. Technical | embedded, stm32, iot, freecad, platformio, power, emc, dsp, spice-sim, electronics, kicad-pcb | Data ready |
+| 5. Applications | web-frontend, web-backend, music-audio, devops, llm-orch | Data ready |
+| 6. Complements | math, security | Data ready |
+
+Architecture: 4 experts/stack, rank 16, top-2 routing, rsLoRA scaling. ~250 MB per frozen stack, ~8 GB total for 32 stacks.
+
 ## Sonnet-Devstral Pipeline
 
 Fine-tune Devstral 2 123B (dense, 72.2% SWE-bench) pour du coding rapide style Sonnet. Dataset mixte ~18K exemples : traces de raisonnement R1, instructions code, trajectoires agentic SWE. Langages cibles : Python, TypeScript, Rust, Go.
