@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Classify examples into 1 of 32 Micro_KIKI domains.
+"""Classify examples into 1 of 35 Micro_KIKI domains.
 
 Reads raw datasets from data/raw/, classifies each example using keyword
 heuristics + regex patterns, and writes per-domain JSONL to data/micro-kiki/classified/.
@@ -32,7 +32,7 @@ def load_config(config_path: str) -> dict:
     """Load and validate domain configuration."""
     with open(config_path) as f:
         config = yaml.safe_load(f)
-    assert len(config["domains"]) == 32, f"Expected 32 domains, got {len(config['domains'])}"
+    assert len(config["domains"]) == 35, f"Expected 35 domains, got {len(config['domains'])}"
     return config
 
 
@@ -42,6 +42,34 @@ def compile_patterns(domains: dict[str, dict]) -> dict[str, list[re.Pattern]]:
     for name, cfg in domains.items():
         compiled[name] = [re.compile(p, re.IGNORECASE) for p in cfg.get("patterns", [])]
     return compiled
+
+
+# --- Word-boundary keyword matching (Fix 1) ---
+_compiled_kw_patterns: dict[str, list[re.Pattern]] = {}
+
+
+def _get_kw_patterns(domain: str, keywords: list[str]) -> list[re.Pattern]:
+    """Return pre-compiled word-boundary patterns for a domain's keywords."""
+    if domain not in _compiled_kw_patterns:
+        _compiled_kw_patterns[domain] = [
+            re.compile(r'\b' + re.escape(kw) + r'\b', re.IGNORECASE)
+            for kw in keywords
+        ]
+    return _compiled_kw_patterns[domain]
+
+
+# --- French detection gate (Fix 2) ---
+_FRENCH_WORDS = frozenset({
+    "le", "la", "les", "un", "une", "des", "du", "de", "et", "est",
+    "en", "que", "qui", "dans", "pour", "sur", "avec", "par", "pas",
+    "plus", "sont", "cette", "ces", "aux", "aussi", "entre", "tout",
+})
+
+
+def _is_french(text: str, threshold: int = 8) -> bool:
+    """Fast heuristic: count common French function words."""
+    words = set(text.lower().split())
+    return len(words & _FRENCH_WORDS) >= threshold
 
 
 def extract_text(example: dict) -> str:
@@ -72,10 +100,11 @@ def score_domain(text: str, domain_name: str, domain_cfg: dict,
     text_lower = text.lower()
     score = 0.0
 
-    # Keyword matches (1 point each, diminishing returns)
+    # Keyword matches (1 point each, diminishing returns) — word boundaries
     keyword_hits = 0
-    for kw in domain_cfg.get("keywords", []):
-        if kw.lower() in text_lower:
+    kw_patterns = _get_kw_patterns(domain_name, domain_cfg.get("keywords", []))
+    for pat in kw_patterns:
+        if pat.search(text):
             keyword_hits += 1
     score += min(keyword_hits * 1.0, 5.0)
 
@@ -109,8 +138,15 @@ def classify_example(example: dict, domains: dict[str, dict],
             best_score = s
             best_domain = name
 
-    # Minimum threshold: at least 1 keyword hit
-    if best_score < 1.0:
+    # French detection gate: if text is French and no strong technical
+    # signal, assign to chat-fr (even if score is below threshold)
+    is_french = _is_french(text)
+    if is_french:
+        if best_score < 6.0:
+            return "chat-fr"
+
+    # Minimum threshold: require at least 2 signals to classify
+    if best_score < 2.0:
         return None
 
     return best_domain
@@ -287,7 +323,7 @@ def run_classification(config_path: str, input_dir: str, output_dir: str,
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Classify examples into 32 Micro_KIKI domains")
+    parser = argparse.ArgumentParser(description="Classify examples into 35 Micro_KIKI domains")
     parser.add_argument("--config", default="configs/micro_kiki/domains.yaml",
                         help="Path to domain configuration YAML")
     parser.add_argument("--input-dir", default="data/raw",

@@ -18,24 +18,61 @@ for name, d in domains.items():
         "phase": d["phase"],
     }
 
+# --- Word-boundary keyword matching (Fix 1) ---
+_compiled_kw_patterns: dict[str, list[re.Pattern]] = {}
+
+
+def _get_kw_patterns(domain: str, keywords: list[str]) -> list[re.Pattern]:
+    """Return pre-compiled word-boundary patterns for a domain's keywords."""
+    if domain not in _compiled_kw_patterns:
+        _compiled_kw_patterns[domain] = [
+            re.compile(r'\b' + re.escape(kw) + r'\b', re.IGNORECASE)
+            for kw in keywords
+        ]
+    return _compiled_kw_patterns[domain]
+
+
+# --- French detection gate (Fix 2) ---
+_FRENCH_WORDS = frozenset({
+    "le", "la", "les", "un", "une", "des", "du", "de", "et", "est",
+    "en", "que", "qui", "dans", "pour", "sur", "avec", "par", "pas",
+    "plus", "sont", "cette", "ces", "aux", "aussi", "entre", "tout",
+})
+
+
+def _is_french(text: str, threshold: int = 8) -> bool:
+    """Fast heuristic: count common French function words."""
+    words = set(text.lower().split())
+    return len(words & _FRENCH_WORDS) >= threshold
+
 def classify_one(text):
-    text_lower = text.lower()
     best_domain = None
     best_score = 0
     for name, d in domain_data.items():
         score = 0
-        for kw in d["keywords"]:
-            if kw.lower() in text_lower:
+        kw_patterns = _get_kw_patterns(name, d["keywords"])
+        for pat in kw_patterns:
+            if pat.search(text):
                 score += 1
-                if score >= 5: break
-        for pat in d["patterns"]:
-            if re.search(pat, text, re.IGNORECASE):
+                if score >= 5:
+                    break
+        for pat_str in d["patterns"]:
+            if re.search(pat_str, text, re.IGNORECASE):
                 score += 3
-                if score >= 15: break
+                if score >= 15:
+                    break
         if score > best_score:
             best_score = score
             best_domain = name
-    return best_domain if best_score >= 1 else None
+    # French detection gate: if text is French and no strong technical
+    # signal, assign to chat-fr (even if score is below threshold)
+    if _is_french(text):
+        if best_score < 6:
+            return "chat-fr"
+    # Minimum threshold: require at least 2 signals to classify
+    if best_score < 2:
+        return None
+    return best_domain
 
 def normalize(raw):
     if "messages" in raw:
