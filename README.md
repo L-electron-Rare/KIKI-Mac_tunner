@@ -87,7 +87,23 @@ Peak memory for 122B training: 383 GB (failed to allocate beyond).
 
 ### HuggingFace publications
 
-> **Aucune publication HF détectée** sous `electron-rare/`, `L-electron-Rare/`, `hypneum-lab/` au 2026-05-04. Le script `scripts/release_hf.py` est en mode dry-run par défaut, jamais exécuté avec `--execute`.
+Deux comptes HF hébergent les adapters du projet (audit 2026-05-04) :
+
+**`clemsail/` (perso)** — 16 modèles
+- `micro-kiki-v3` — 242 dl, 4♥ (le plus utilisé)
+- 10 × `kiki-{kicad,stm32,platformio,iot,freecad,power,emc,spice,embedded,dsp}-sft` — 46–94 dl chacun
+- 5 × récents à 0 dl (`micro-kiki-v35b`, `micro-kiki-router-v4`, `micro-kiki-v4-sota`, `spikingkiki-35b-a3b-v4`, `spikingkiki-v4-adapters`) → model cards à compléter
+
+**`electron-rare/` (org)** — 8 modèles, 9 datasets, 1 Space
+- 6 × `mascarade-{esp32,iot,kicad-v2-lora,platformio,spice,spice-v1-lora}` — 1–7 dl
+- 2 × `kiki-{stm32,kicad}-sft-v1` (0 dl, doublons des `clemsail/` à réconcilier)
+- 9 datasets `mascarade-{stm32,spice,iot,power,dsp,emc,kicad,embedded}-dataset` + `kill-life-embedded-qa`
+
+**Pas encore publiés**
+- `output/mistral-large-opus/adapters.safetensors` (3.36 GB, terminé iter 1100, dormant 21+ j)
+- Stack EU-KIKI v1 (Apertus 70B + Devstral 24B + EuroLLM 22B) → repo privé [`L-electron-Rare/eu-kiki`](https://github.com/L-electron-Rare/eu-kiki)
+
+Le script `scripts/release_hf.py` reste en mode dry-run, jamais lancé avec `--execute` (les publications existantes ont été faites manuellement).
 
 ## Inference Benchmarks
 
