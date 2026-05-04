@@ -88,7 +88,9 @@ Mac Studio M3 Ultra, 512 Go mémoire unifiée. MLX bf16 complet.
 
 ### 🟡 Cleanup
 
-- Publier sur HF (`L-electron-Rare/`) au moins `mistral-large-opus` + EU-KIKI v1 stack — `scripts/release_hf.py` prêt en dry-run, jamais lancé `--execute`. (3-4 h)
+- Publier sur HF `mistral-large-opus` (3.36 GB, dormant) + stack EU-KIKI v1 (Apertus/Devstral/EuroLLM) — pas encore sur `clemsail/` ni `electron-rare/`. `scripts/release_hf.py` prêt en dry-run, jamais lancé `--execute`. (3-4 h)
+- Réconcilier les doublons HF : `clemsail/kiki-{stm32,kicad}-sft` (79+94 dl) vs `electron-rare/kiki-{stm32,kicad}-sft-v1` (0 dl). Archiver les v1 vides ou rapatrier les vrais. (1 h)
+- Compléter les model cards des 5 modèles `clemsail/` à 0 dl (`micro-kiki-{v35b,router-v4,v4-sota}`, `spikingkiki-{35b-a3b-v4,v4-adapters}`). (2 h)
 - Archiver dossiers fantômes (utiliser `tools/archive_dead_artifacts.sh`) :
   - `output/micro-kiki/stacks-v3-r16/` (14 GB, lora_B=0)
   - `output/micro-kiki/lora-qwen36-35b-hybrid/*` (dossiers vides)
