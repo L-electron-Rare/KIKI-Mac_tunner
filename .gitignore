@@ -34,3 +34,9 @@ logs/
 =0.22.0
 =0.24.0
 *.bak*
+
+# Local agent state (claude-code session memory)
+.claude/
+
+# Archive folder (created by tools/archive_dead_artifacts.sh)
+_archive/
