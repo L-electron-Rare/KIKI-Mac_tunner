@@ -93,7 +93,7 @@ def compute_null_space_projector(
         P: (weight_dim, weight_dim) projection matrix into null-space
     """
     if len(frozen_weight_vectors) == 0:
-        return np.zeros((0, weight_dim), dtype=np.float32)  # no directions to block
+        return np.eye(weight_dim, dtype=np.float32)
 
     # Stack frozen weights into a matrix: (num_frozen, weight_dim)
     W = np.stack(frozen_weight_vectors, axis=0).astype(np.float32)
@@ -117,30 +117,26 @@ def compute_null_space_projector(
         )
         V_keep = Vt  # (n_components, weight_dim)
 
-    # Return V_keep directly instead of full P = I - V^T @ V
-    # This saves O(weight_dim^2) memory — only O(k * weight_dim) needed
-    return V_keep.astype(np.float32)
+    # Null-space projector: P = I - V^T @ V
+    # V_keep rows are the directions to block
+    P = np.eye(weight_dim, dtype=np.float32) - V_keep.T @ V_keep
+
+    return P
 
 
 def project_gradient(grad: mx.array, projector: mx.array) -> mx.array:
     """Project a gradient vector into the null-space.
 
-    Uses V_keep (k, dim) instead of full (dim, dim) projector.
-    Computes: grad - V^T @ (V @ grad) without materializing P.
-
     Args:
         grad: (weight_dim,) or (d1, d2) gradient tensor
-        projector: (k, weight_dim) blocked directions matrix
+        projector: (weight_dim, weight_dim) null-space projection matrix
 
     Returns:
         Projected gradient with same shape as input
     """
     original_shape = grad.shape
     flat = mx.reshape(grad, (-1,))
-    # grad_proj = grad - V^T @ (V @ grad)
-    v_dot_g = projector @ flat          # (k,)
-    correction = projector.T @ v_dot_g  # (dim,)
-    projected = flat - correction
+    projected = projector @ flat
     return mx.reshape(projected, original_shape)
 
 
@@ -212,7 +208,7 @@ def build_projectors_for_stack(
         svd_n_iter: power iterations
 
     Returns:
-        Dict mapping layer_name -> (k, weight_dim) MLX V_keep matrix
+        Dict mapping layer_name -> (weight_dim, weight_dim) MLX projector
     """
     if len(frozen_stack_dirs) == 0:
         return {}
