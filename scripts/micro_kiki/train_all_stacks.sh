@@ -88,7 +88,7 @@ DOMAINS=(
     power
     emc
     dsp
-    spice-sim
+    # spice-sim: MERGED into spice (2026-04-17)
     electronics
     kicad-pcb
     # Phase 5 — Applications
@@ -197,7 +197,7 @@ for i in $(seq 1 "$TOTAL"); do
 
     # Run training, tee to log, preserve exit code through pipe
     set +e
-    uv run python "$SCRIPT_DIR/train_stack.py" \
+    /opt/homebrew/bin/python3.12 "$SCRIPT_DIR/train_stack.py" \
         --config "$CONFIG" \
         --domain "$domain" \
         --stack-index "$i" \
@@ -288,7 +288,7 @@ echo ""
 echo "Running final forgetting evaluation..."
 echo ""
 
-uv run python "$SCRIPT_DIR/eval_stack.py" --config "$CONFIG" --all
+/opt/homebrew/bin/python3.12 "$SCRIPT_DIR/eval_stack.py" --config "$CONFIG" --all
 
 echo ""
 echo "Next steps:"

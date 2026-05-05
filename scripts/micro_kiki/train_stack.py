@@ -253,14 +253,23 @@ def train_single_stack(config_path: str, domain: str, stack_index: int) -> None:
     # Freeze all base parameters
     model.freeze()
 
-    # ---- 2. Attach MoE-LoRA ----
-    print("\n[2/7] Attaching MoE-LoRA...")
+    # ---- 2. Attach MoE-LoRA (dynamic rank) ----
+    # Dynamic rank: sqrt(dataset_size) / 4, clamped [8, 64], rounded to multiple of 4
+    data_dir = Path(config["data"]["base_dir"]) / domain
+    train_file = data_dir / "train.jsonl"
+    n_examples = sum(1 for _ in open(train_file)) if train_file.exists() else 500
+    dynamic_rank = min(64, max(8, (int(math.sqrt(n_examples) / 4) // 4) * 4 or 8))
+    dynamic_alpha = dynamic_rank * 2.0
+    use_dynamic = config.get("dynamic_rank", True)
+    effective_rank = dynamic_rank if use_dynamic else moe_cfg["rank"]
+    effective_alpha = dynamic_alpha if use_dynamic else moe_cfg["alpha"]
+    print(f"\n[2/7] Attaching MoE-LoRA (rank={effective_rank}, alpha={effective_alpha}, examples={n_examples})...")
     n_attached = apply_moe_lora(
         model,
         target_modules=model_cfg["target_modules"],
         num_experts=moe_cfg["num_experts"],
-        rank=moe_cfg["rank"],
-        alpha=moe_cfg["alpha"],
+        rank=effective_rank,
+        alpha=effective_alpha,
         top_k=moe_cfg["top_k"],
         dropout=moe_cfg.get("dropout", 0.01),
         router_hidden=moe_cfg["router_hidden"],
@@ -268,12 +277,24 @@ def train_single_stack(config_path: str, domain: str, stack_index: int) -> None:
     )
     print(f"  Attached {n_attached} MoE-LoRA layers")
 
+
     # Count trainable params
     from mlx.utils import tree_flatten
     all_params = tree_flatten(model.parameters())
     trainable = sum(p.size for name, p in all_params if "moe_lora" in name)
     total = sum(p.size for _, p in all_params)
     print(f"  Trainable: {trainable:,} / {total:,} ({trainable/total*100:.4f}%)")
+
+    # Unfreeze MoE-LoRA modules so they receive gradients
+    # (base model stays frozen via model.freeze() above)
+    unfrozen = 0
+    for name, module in model.named_modules():
+        if "moe_lora" in name:
+            module.unfreeze()
+            unfrozen += 1
+    tp_check = sum(p.size for _, p in tree_flatten(model.trainable_parameters()))
+    print(f"  Unfroze {unfrozen} MoE-LoRA modules ({tp_check:,} grad-enabled params)")
+    assert tp_check > 0, "ERROR: No trainable params after unfreeze! Training would be no-op."
 
     # ---- 3. Build null-space projectors from frozen stacks ----
     print("\n[3/7] Building null-space projectors...")
@@ -286,12 +307,18 @@ def train_single_stack(config_path: str, domain: str, stack_index: int) -> None:
 
     projectors = {}
     if len(frozen_dirs) > 0:
-        # TODO: fix null-space projection dimension mismatch (projectors concat
-        # all expert weights per layer, but grads arrive per-tensor).
-        # For now, skip projection — each stack is independent.
-        # The MoE routing naturally reduces interference between domains.
-        print(f"  WARNING: Null-space projection disabled (dimension fix pending)")
-        print(f"  Found {len(frozen_dirs)} frozen stacks — forgetting check still active")
+        try:
+            projectors = build_projectors_for_stack(
+                frozen_stack_dirs=frozen_dirs,
+                ns_top_k_dirs=ns_cfg["ns_top_k_dirs"],
+                svd_oversampling=ns_cfg.get("svd_oversampling", 10),
+                svd_n_iter=ns_cfg.get("svd_n_iter", 3),
+            )
+            print(f"  Built {len(projectors)} null-space projectors from {len(frozen_dirs)} frozen stacks")
+        except Exception as e:
+            print(f"  WARNING: Null-space projection failed: {e}")
+            print(f"  Continuing without projection (forgetting check still active)")
+            projectors = {}
     else:
         print("  No frozen stacks (first domain in curriculum)")
 
@@ -304,7 +331,15 @@ def train_single_stack(config_path: str, domain: str, stack_index: int) -> None:
     # ---- 5. SFT training loop ----
     print("\n[5/7] SFT training...")
     lr = float(train_cfg["learning_rate"])
-    max_steps = int(train_cfg["max_steps"])
+    # Adaptive max_steps: scale with rank (more capacity = more steps to converge)
+    base_max_steps = int(train_cfg["max_steps"])
+    if effective_rank <= 16:
+        max_steps = min(base_max_steps, 500)
+    elif effective_rank <= 32:
+        max_steps = min(base_max_steps, 1000)
+    else:
+        max_steps = base_max_steps  # 1500 for rank > 32
+    print(f"  Adaptive max_steps={max_steps} (rank={effective_rank}, base={base_max_steps})")
     warmup_steps = int(max_steps * float(train_cfg.get("warmup_ratio", 0.05)))
     batch_size = train_cfg["batch_size"]
     grad_accum = train_cfg["grad_accumulation_steps"]

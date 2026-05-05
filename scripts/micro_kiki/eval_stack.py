@@ -27,7 +27,41 @@ import mlx.nn as nn
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from micro_kiki.moe_lora import apply_moe_lora
+from micro_kiki.moe_lora import apply_moe_lora, MoELoRALinear
+
+
+# ---------------------------------------------------------------------------
+# Unwrap MoE-LoRA (restore base nn.Linear modules)
+# ---------------------------------------------------------------------------
+
+def unwrap_moe_lora(model: nn.Module) -> int:
+    """Replace every MoELoRALinear in the model with its original nn.Linear.
+
+    This restores the model to base state so apply_moe_lora() can
+    re-attach fresh adapters (it only wraps nn.Linear, not MoELoRALinear).
+
+    Walks the same path as apply_moe_lora: model.model.layers[i].{self_attn,mlp}.
+
+    Returns the number of layers unwrapped.
+    """
+    count = 0
+    layers = model.model.layers if hasattr(model, "model") else model.layers
+
+    for layer in layers:
+        for sub_name in ["self_attn", "mlp"]:
+            sub_module = getattr(layer, sub_name, None)
+            if sub_module is None:
+                continue
+            for attr_name in list(vars(sub_module).keys()):
+                child = getattr(sub_module, attr_name, None)
+                if isinstance(child, MoELoRALinear):
+                    setattr(sub_module, attr_name, child.base)
+                    count += 1
+                # Also remove the sibling _moe_lora ref if present
+            for attr_name in list(vars(sub_module).keys()):
+                if attr_name.endswith("_moe_lora"):
+                    delattr(sub_module, attr_name)
+    return count
 
 
 # ---------------------------------------------------------------------------
@@ -177,12 +211,14 @@ def load_stack_weights(model: nn.Module, stack_dir: str) -> None:
     """Load a frozen stack's MoE-LoRA weights into the model.
 
     Reads adapters.safetensors from the stack directory and loads
-    the weights with strict=False (only MoE-LoRA keys will match).
+    the weights with strict=True so missing/extra keys raise immediately.
     """
     adapter_path = Path(stack_dir) / "adapters.safetensors"
     if not adapter_path.exists():
         raise FileNotFoundError(f"No adapter found at {adapter_path}")
-    model.load_weights(str(adapter_path), strict=False)
+    weights = list(mx.load(str(adapter_path)).items())
+    print(f"  Loading {len(weights)} adapter weight tensors from {adapter_path.name}")
+    model.load_weights(weights, strict=True)
 
 
 # ---------------------------------------------------------------------------
@@ -333,7 +369,12 @@ def evaluate_all_domains(config_path: str) -> dict[str, dict[str, float]]:
         print(f"Stack: {active_domain}")
         print(f"{'=' * 50}")
 
-        # Re-attach fresh MoE-LoRA (overwrites previous adapter state)
+        # Unwrap any existing MoE-LoRA layers back to base nn.Linear
+        n_unwrapped = unwrap_moe_lora(model)
+        if n_unwrapped > 0:
+            print(f"  Unwrapped {n_unwrapped} MoE-LoRA layers back to base")
+
+        # Attach fresh MoE-LoRA on clean base nn.Linear modules
         apply_moe_lora(
             model,
             target_modules=model_cfg["target_modules"],

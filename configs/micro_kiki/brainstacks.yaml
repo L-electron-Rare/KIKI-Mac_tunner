@@ -102,3 +102,8 @@ curriculum:
   # Phase 6 — Complements
   - math
   - security
+  # Phase 7 — New V3 domains
+  - components
+  - llm-ops
+  - ml-training
+dynamic_rank: true
